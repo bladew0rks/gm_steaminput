@@ -1,4 +1,5 @@
-use std::ffi::c_void;
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void, CString};
 use std::sync::Mutex;
 
 use libloading::os::windows::Library;
@@ -7,7 +8,32 @@ const STEAM_API_DLL: &str = "steam_api64.dll";
 pub const MAX_CONTROLLERS: usize = 16;
 
 pub type InputHandle = u64;
+pub const ALL_CONTROLLERS: InputHandle = u64::MAX;
 type Iface = *mut c_void;
+type NameToHandle = unsafe extern "C" fn(Iface, *const c_char) -> u64;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DigitalActionData {
+    pub state: bool,
+    pub active: bool,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct AnalogActionData {
+    pub mode: i32,
+    pub x: f32,
+    pub y: f32,
+    pub active: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum HandleKind {
+    ActionSet,
+    Digital,
+    Analog,
+}
 
 pub struct SteamInput {
     _lib: Library,
@@ -19,6 +45,14 @@ pub struct SteamInput {
     trigger_vibration: unsafe extern "C" fn(Iface, InputHandle, u16, u16),
     set_led_color: unsafe extern "C" fn(Iface, InputHandle, u8, u8, u8, u32),
     show_binding_panel: unsafe extern "C" fn(Iface, InputHandle) -> bool,
+    set_manifest_path: unsafe extern "C" fn(Iface, *const c_char) -> bool,
+    get_action_set_handle: NameToHandle,
+    activate_action_set: unsafe extern "C" fn(Iface, InputHandle, u64),
+    get_digital_action_handle: NameToHandle,
+    get_digital_action_data: unsafe extern "C" fn(Iface, InputHandle, u64) -> DigitalActionData,
+    get_analog_action_handle: NameToHandle,
+    get_analog_action_data: unsafe extern "C" fn(Iface, InputHandle, u64) -> AnalogActionData,
+    handles: Mutex<HashMap<(HandleKind, String), u64>>,
 }
 
 unsafe impl Send for SteamInput {}
@@ -53,6 +87,14 @@ impl SteamInput {
             trigger_vibration: sym(&lib, "SteamAPI_ISteamInput_TriggerVibration")?,
             set_led_color: sym(&lib, "SteamAPI_ISteamInput_SetLEDColor")?,
             show_binding_panel: sym(&lib, "SteamAPI_ISteamInput_ShowBindingPanel")?,
+            set_manifest_path: sym(&lib, "SteamAPI_ISteamInput_SetInputActionManifestFilePath")?,
+            get_action_set_handle: sym(&lib, "SteamAPI_ISteamInput_GetActionSetHandle")?,
+            activate_action_set: sym(&lib, "SteamAPI_ISteamInput_ActivateActionSet")?,
+            get_digital_action_handle: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionHandle")?,
+            get_digital_action_data: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionData")?,
+            get_analog_action_handle: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionHandle")?,
+            get_analog_action_data: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionData")?,
+            handles: Mutex::new(HashMap::new()),
             _lib: lib,
         };
 
@@ -87,6 +129,49 @@ impl SteamInput {
 
     pub fn show_binding_panel(&self, handle: InputHandle) -> bool {
         unsafe { (self.show_binding_panel)(self.iface, handle) }
+    }
+}
+
+impl SteamInput {
+    pub fn set_manifest_path(&self, path: &str) -> bool {
+        let Ok(path) = CString::new(path) else { return false };
+        self.handles.lock().unwrap().clear();
+        unsafe { (self.set_manifest_path)(self.iface, path.as_ptr()) }
+    }
+
+    fn handle(&self, kind: HandleKind, name: &str) -> Option<u64> {
+        let key = (kind, name.to_owned());
+        if let Some(&handle) = self.handles.lock().unwrap().get(&key) {
+            return Some(handle);
+        }
+        let cname = CString::new(name).ok()?;
+        let lookup = match kind {
+            HandleKind::ActionSet => self.get_action_set_handle,
+            HandleKind::Digital => self.get_digital_action_handle,
+            HandleKind::Analog => self.get_analog_action_handle,
+        };
+        let handle = unsafe { lookup(self.iface, cname.as_ptr()) };
+        if handle == 0 {
+            return None;
+        }
+        self.handles.lock().unwrap().insert(key, handle);
+        Some(handle)
+    }
+
+    pub fn activate_action_set(&self, controller: InputHandle, set: &str) -> bool {
+        let Some(set) = self.handle(HandleKind::ActionSet, set) else { return false };
+        unsafe { (self.activate_action_set)(self.iface, controller, set) };
+        true
+    }
+
+    pub fn digital_action(&self, controller: InputHandle, action: &str) -> Option<DigitalActionData> {
+        let action = self.handle(HandleKind::Digital, action)?;
+        Some(unsafe { (self.get_digital_action_data)(self.iface, controller, action) })
+    }
+
+    pub fn analog_action(&self, controller: InputHandle, action: &str) -> Option<AnalogActionData> {
+        let action = self.handle(HandleKind::Analog, action)?;
+        Some(unsafe { (self.get_analog_action_data)(self.iface, controller, action) })
     }
 }
 

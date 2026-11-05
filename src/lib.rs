@@ -1,6 +1,8 @@
 use gmod::lua::{LuaFunction, LuaString, State};
 use gmod::*;
 
+mod actions;
+mod register;
 mod steam_api;
 
 use steam_api::InputHandle;
@@ -34,10 +36,62 @@ unsafe fn is_loaded(lua: State) -> i32 {
     1
 }
 
+unsafe fn report_error(lua: State, msg: &str) {
+    lua.get_global(lua_string!("ErrorNoHalt"));
+    lua.push_string(&format!("[steaminput] {msg}\n"));
+    lua.call(1, 0);
+}
+
+fn apply_actions() -> Result<(), String> {
+    let path = actions::write_files()?;
+    match steam_api::with(|api| api.set_manifest_path(&path)) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!("Steam rejected the action manifest at {path}")),
+        None => Err("Steam Input is not initialized".into()),
+    }
+}
+
 #[lua_function]
-unsafe fn run_frame(_lua: State) -> i32 {
+unsafe fn run_frame(lua: State) -> i32 {
+    if actions::take_dirty() {
+        if let Err(e) = apply_actions() {
+            report_error(lua, &format!("failed to apply actions: {e}"));
+        }
+    }
     steam_api::with(|api| api.run_frame());
     0
+}
+
+#[lua_function]
+unsafe fn register_action_set(lua: State) -> i32 {
+    let name = lua.check_string(1).into_owned();
+    lua.check_table(2);
+    let result = register::parse_action_set(lua, 2).and_then(|mut set| {
+        if set.title.is_empty() {
+            set.title = name.clone();
+        }
+        actions::register(&name, set)
+    });
+    if let Err(e) = result {
+        lua.error(format!("[steaminput] RegisterActionSet('{name}'): {e}"));
+    }
+    0
+}
+
+#[lua_function]
+unsafe fn apply_actions_now(lua: State) -> i32 {
+    actions::take_dirty();
+    match apply_actions() {
+        Ok(()) => {
+            lua.push_boolean(true);
+            1
+        }
+        Err(e) => {
+            lua.push_boolean(false);
+            lua.push_string(&e);
+            2
+        }
+    }
 }
 
 #[lua_function]
@@ -92,6 +146,60 @@ unsafe fn show_binding_panel(lua: State) -> i32 {
     1
 }
 
+unsafe fn check_controller(lua: State, arg: i32) -> InputHandle {
+    if lua.check_string(arg).trim() == "all" {
+        steam_api::ALL_CONTROLLERS
+    } else {
+        check_handle(lua, arg)
+    }
+}
+
+#[lua_function]
+unsafe fn activate_action_set(lua: State) -> i32 {
+    let controller = check_controller(lua, 1);
+    let set = lua.check_string(2).into_owned();
+    let ok = require_api(lua, |api| api.activate_action_set(controller, &set));
+    lua.push_boolean(ok);
+    1
+}
+
+#[lua_function]
+unsafe fn get_digital_action(lua: State) -> i32 {
+    let controller = check_handle(lua, 1);
+    let action = actions::steam_action_name(&lua.check_string(2), &lua.check_string(3));
+    match require_api(lua, |api| api.digital_action(controller, &action)) {
+        Some(data) => {
+            lua.push_boolean(data.state);
+            lua.push_boolean(data.active);
+        }
+        None => {
+            lua.push_boolean(false);
+            lua.push_boolean(false);
+        }
+    }
+    2
+}
+
+#[lua_function]
+unsafe fn get_analog_action(lua: State) -> i32 {
+    let controller = check_handle(lua, 1);
+    let action = actions::steam_action_name(&lua.check_string(2), &lua.check_string(3));
+    match require_api(lua, |api| api.analog_action(controller, &action)) {
+        Some(data) => {
+            let (x, y, active) = (data.x, data.y, data.active);
+            lua.push_number(x as f64);
+            lua.push_number(y as f64);
+            lua.push_boolean(active);
+        }
+        None => {
+            lua.push_number(0.0);
+            lua.push_number(0.0);
+            lua.push_boolean(false);
+        }
+    }
+    3
+}
+
 unsafe fn set_function(lua: State, name: LuaString, func: LuaFunction) {
     lua.push_function(func);
     lua.set_field(-2, name);
@@ -114,6 +222,11 @@ unsafe fn gmod13_open(lua: State) -> i32 {
     set_function(lua, lua_string!("SetLEDColor"), set_led_color);
     set_function(lua, lua_string!("ResetLEDColor"), reset_led_color);
     set_function(lua, lua_string!("ShowBindingPanel"), show_binding_panel);
+    set_function(lua, lua_string!("RegisterActionSet"), register_action_set);
+    set_function(lua, lua_string!("ApplyActions"), apply_actions_now);
+    set_function(lua, lua_string!("ActivateActionSet"), activate_action_set);
+    set_function(lua, lua_string!("GetDigitalAction"), get_digital_action);
+    set_function(lua, lua_string!("GetAnalogAction"), get_analog_action);
     lua.set_global(lua_string!("steaminput"));
 
     lua.get_global(lua_string!("hook"));
