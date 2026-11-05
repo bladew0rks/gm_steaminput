@@ -1,0 +1,12 @@
+[package]
+name = "gm_steaminput"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "steaminput"
+crate-type = ["cdylib"]
+
+[dependencies]
+gmod = "*"
+libloading = "*"
