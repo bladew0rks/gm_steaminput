@@ -440,7 +440,7 @@ fn fnv1a(s: &str) -> u32 {
     s.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193))
 }
 
-fn garrysmod_dir() -> Result<PathBuf, String> {
+pub fn garrysmod_dir() -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("garrysmod"));

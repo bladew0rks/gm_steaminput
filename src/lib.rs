@@ -2,6 +2,7 @@ use gmod::lua::{LuaFunction, LuaString, State};
 use gmod::*;
 
 mod actions;
+mod glyphs;
 mod register;
 mod steam_api;
 
@@ -200,6 +201,52 @@ unsafe fn get_analog_action(lua: State) -> i32 {
     3
 }
 
+unsafe fn push_origins(lua: State, analog: bool) -> i32 {
+    let controller = check_handle(lua, 1);
+    let set = lua.check_string(2).into_owned();
+    let action = actions::steam_action_name(&set, &lua.check_string(3));
+    let origins = require_api(lua, |api| api.action_origins(controller, &set, &action, analog));
+    lua.create_table(origins.len() as i32, 0);
+    for (i, origin) in origins.iter().enumerate() {
+        lua.push_integer(*origin as _);
+        lua.raw_seti(-2, i as i32 + 1);
+    }
+    1
+}
+
+#[lua_function]
+unsafe fn get_digital_action_origins(lua: State) -> i32 {
+    push_origins(lua, false)
+}
+
+#[lua_function]
+unsafe fn get_analog_action_origins(lua: State) -> i32 {
+    push_origins(lua, true)
+}
+
+#[lua_function]
+unsafe fn get_glyph(lua: State) -> i32 {
+    let origin = lua.check_integer(1) as i32;
+    let size = if lua.is_none_or_nil(2) { 0 } else { lua.check_integer(2).clamp(0, 2) as i32 };
+    let flags = if lua.is_none_or_nil(3) { 0 } else { lua.check_integer(3) as u32 };
+    let source = require_api(lua, |api| api.glyph_png(origin, size, flags));
+    match glyphs::material_path(origin, size, flags, || source) {
+        Some(path) => lua.push_string(&path),
+        None => lua.push_nil(),
+    }
+    1
+}
+
+#[lua_function]
+unsafe fn get_origin_name(lua: State) -> i32 {
+    let origin = lua.check_integer(1) as i32;
+    match require_api(lua, |api| api.origin_name(origin)) {
+        Some(name) => lua.push_string(&name),
+        None => lua.push_nil(),
+    }
+    1
+}
+
 unsafe fn set_function(lua: State, name: LuaString, func: LuaFunction) {
     lua.push_function(func);
     lua.set_field(-2, name);
@@ -223,6 +270,10 @@ unsafe fn gmod13_open(lua: State) -> i32 {
     set_function(lua, lua_string!("ResetLEDColor"), reset_led_color);
     set_function(lua, lua_string!("ShowBindingPanel"), show_binding_panel);
     set_function(lua, lua_string!("RegisterActionSet"), register_action_set);
+    set_function(lua, lua_string!("GetDigitalActionOrigins"), get_digital_action_origins);
+    set_function(lua, lua_string!("GetAnalogActionOrigins"), get_analog_action_origins);
+    set_function(lua, lua_string!("GetGlyph"), get_glyph);
+    set_function(lua, lua_string!("GetOriginName"), get_origin_name);
     set_function(lua, lua_string!("ApplyActions"), apply_actions_now);
     set_function(lua, lua_string!("ActivateActionSet"), activate_action_set);
     set_function(lua, lua_string!("GetDigitalAction"), get_digital_action);

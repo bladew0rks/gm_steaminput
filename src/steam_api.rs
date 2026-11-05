@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 
 use libloading::os::windows::Library;
@@ -9,8 +9,10 @@ pub const MAX_CONTROLLERS: usize = 16;
 
 pub type InputHandle = u64;
 pub const ALL_CONTROLLERS: InputHandle = u64::MAX;
+const MAX_ORIGINS: usize = 8;
 type Iface = *mut c_void;
 type NameToHandle = unsafe extern "C" fn(Iface, *const c_char) -> u64;
+type GetOrigins = unsafe extern "C" fn(Iface, InputHandle, u64, u64, *mut i32) -> i32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -52,6 +54,10 @@ pub struct SteamInput {
     get_digital_action_data: unsafe extern "C" fn(Iface, InputHandle, u64) -> DigitalActionData,
     get_analog_action_handle: NameToHandle,
     get_analog_action_data: unsafe extern "C" fn(Iface, InputHandle, u64) -> AnalogActionData,
+    get_digital_action_origins: GetOrigins,
+    get_analog_action_origins: GetOrigins,
+    get_glyph_png: unsafe extern "C" fn(Iface, i32, i32, u32) -> *const c_char,
+    get_string_for_origin: unsafe extern "C" fn(Iface, i32) -> *const c_char,
     handles: Mutex<HashMap<(HandleKind, String), u64>>,
 }
 
@@ -94,6 +100,10 @@ impl SteamInput {
             get_digital_action_data: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionData")?,
             get_analog_action_handle: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionHandle")?,
             get_analog_action_data: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionData")?,
+            get_digital_action_origins: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionOrigins")?,
+            get_analog_action_origins: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionOrigins")?,
+            get_glyph_png: sym(&lib, "SteamAPI_ISteamInput_GetGlyphPNGForActionOrigin")?,
+            get_string_for_origin: sym(&lib, "SteamAPI_ISteamInput_GetStringForActionOrigin")?,
             handles: Mutex::new(HashMap::new()),
             _lib: lib,
         };
@@ -172,6 +182,34 @@ impl SteamInput {
     pub fn analog_action(&self, controller: InputHandle, action: &str) -> Option<AnalogActionData> {
         let action = self.handle(HandleKind::Analog, action)?;
         Some(unsafe { (self.get_analog_action_data)(self.iface, controller, action) })
+    }
+}
+
+unsafe fn owned_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let s = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+    (!s.is_empty()).then_some(s)
+}
+
+impl SteamInput {
+    pub fn action_origins(&self, controller: InputHandle, set: &str, action: &str, analog: bool) -> Vec<i32> {
+        let Some(set) = self.handle(HandleKind::ActionSet, set) else { return Vec::new() };
+        let kind = if analog { HandleKind::Analog } else { HandleKind::Digital };
+        let Some(action) = self.handle(kind, action) else { return Vec::new() };
+        let lookup = if analog { self.get_analog_action_origins } else { self.get_digital_action_origins };
+        let mut origins = [0i32; MAX_ORIGINS];
+        let count = unsafe { lookup(self.iface, controller, set, action, origins.as_mut_ptr()) };
+        origins[..count.clamp(0, MAX_ORIGINS as i32) as usize].to_vec()
+    }
+
+    pub fn glyph_png(&self, origin: i32, size: i32, flags: u32) -> Option<String> {
+        unsafe { owned_string((self.get_glyph_png)(self.iface, origin, size, flags)) }
+    }
+
+    pub fn origin_name(&self, origin: i32) -> Option<String> {
+        unsafe { owned_string((self.get_string_for_origin)(self.iface, origin)) }
     }
 }
 

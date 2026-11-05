@@ -14,19 +14,19 @@ local BUTTON_ORDER = {
 }
 
 local BUTTONS = {
-	attack = { title = "Primary Attack", default = "rt", key = IN_ATTACK, short = "Attack" },
-	attack2 = { title = "Secondary Attack", default = "lt", key = IN_ATTACK2, short = "Attack 2" },
-	jump = { title = "Jump", default = "a", key = IN_JUMP, short = "Jump" },
-	duck = { title = "Crouch", default = "b", key = IN_DUCK, short = "Crouch" },
-	reload = { title = "Reload", default = "x", key = IN_RELOAD, short = "Reload" },
-	use = { title = "Use", default = "y", key = IN_USE, short = "Use" },
-	sprint = { title = "Sprint", default = "ls", key = IN_SPEED, short = "Sprint" },
-	walk = { title = "Walk", default = "rs", key = IN_WALK, short = "Walk" },
-	invprev = { title = "Previous Weapon", default = "lb", short = "Prev Wep" },
-	invnext = { title = "Next Weapon", default = "rb", short = "Next Wep" },
-	flashlight = { title = "Flashlight", default = "dpad_up", short = "Light" },
-	scores = { title = "Scoreboard", default = "back", short = "Scores" },
-	menu = { title = "Menu", default = "start", short = "Menu" },
+	attack = { title = "Primary Attack", default = "rt", key = IN_ATTACK },
+	attack2 = { title = "Secondary Attack", default = "lt", key = IN_ATTACK2 },
+	jump = { title = "Jump", default = "a", key = IN_JUMP },
+	duck = { title = "Crouch", default = "b", key = IN_DUCK },
+	reload = { title = "Reload", default = "x", key = IN_RELOAD },
+	use = { title = "Use", default = "y", key = IN_USE },
+	sprint = { title = "Sprint", default = "ls", key = IN_SPEED },
+	walk = { title = "Walk", default = "rs", key = IN_WALK },
+	invprev = { title = "Previous Weapon", default = "lb" },
+	invnext = { title = "Next Weapon", default = "rb" },
+	flashlight = { title = "Flashlight", default = "dpad_up" },
+	scores = { title = "Scoreboard", default = "back" },
+	menu = { title = "Menu", default = "start" },
 }
 
 steaminput.RegisterActionSet(SET, {
@@ -147,6 +147,8 @@ hook.Add("CreateMove", "steaminput_base", function(cmd)
 		if def.key and held[name] then cmd:AddKey(def.key) end
 	end
 
+	if cmd:CommandNumber() == 0 then return end
+
 	if queued.flashlight then
 		queued.flashlight = nil
 		cmd:SetImpulse(100)
@@ -162,56 +164,123 @@ hook.Add("CreateMove", "steaminput_base", function(cmd)
 end)
 
 surface.CreateFont("SteamInputOverlay", { font = "Roboto", size = 15, weight = 600 })
-surface.CreateFont("SteamInputOverlaySmall", { font = "Roboto", size = 12, weight = 500 })
+surface.CreateFont("SteamInputOverlaySmall", { font = "Roboto", size = 13, weight = 500 })
 
-local COLOR_BG = Color(15, 17, 22, 200)
+local COLOR_BG = Color(15, 17, 22, 210)
 local COLOR_RING = Color(255, 255, 255, 40)
 local COLOR_DOT = Color(102, 192, 244)
-local COLOR_CHIP = Color(255, 255, 255, 18)
-local COLOR_CHIP_ON = Color(102, 192, 244, 220)
+local COLOR_ROW = Color(255, 255, 255, 12)
+local COLOR_ROW_ON = Color(102, 192, 244, 200)
 local COLOR_TEXT = Color(230, 232, 236)
 local COLOR_MUTED = Color(150, 155, 165)
 
-local function drawStick(cx, cy, r, x, y, label)
+local ANALOG = {
+	{ name = "move", label = "Move", scale = 1, flipY = false },
+	{ name = "look", label = "Look", scale = 1 / 20, flipY = true },
+}
+
+local origins = {}
+local nextOriginScan = 0
+local originController
+local materials = {}
+
+local function glyphMaterial(origin)
+	local path = steaminput.GetGlyph(origin, 0, 0)
+	if not path then return end
+	local mat = materials[path]
+	if not mat then
+		mat = Material(path, "smooth mips")
+		materials[path] = mat
+	end
+	return mat
+end
+
+local function refreshOrigins()
+	local h = state.controller
+	origins = {}
+	if not h then return end
+	for _, name in ipairs(BUTTON_ORDER) do
+		origins[name] = steaminput.GetDigitalActionOrigins(h, SET, name)
+	end
+	for _, a in ipairs(ANALOG) do
+		origins[a.name] = steaminput.GetAnalogActionOrigins(h, SET, a.name)
+	end
+end
+
+local function drawGlyphs(list, x, y, size)
+	if not list or #list == 0 then
+		draw.RoundedBox(0, x, y, size, size, COLOR_ROW)
+		draw.SimpleText("?", "SteamInputOverlaySmall", x + size / 2, y + size / 2, COLOR_MUTED, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+		return size
+	end
+	local cx = x
+	for i = 1, math.min(#list, 2) do
+		local mat = glyphMaterial(list[i])
+		if mat and not mat:IsError() then
+			surface.SetDrawColor(255, 255, 255)
+			surface.SetMaterial(mat)
+			surface.DrawTexturedRect(cx, y, size, size)
+		else
+			local name = steaminput.GetOriginName(list[i]) or "?"
+			draw.SimpleText(name, "SteamInputOverlaySmall", cx, y + size / 2, COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+		end
+		cx = cx + size + 2
+	end
+	return cx - x - 2
+end
+
+local function drawStick(cx, cy, r, x, y)
 	surface.DrawCircle(cx, cy, r, COLOR_RING)
-	surface.DrawCircle(cx, cy, 1, COLOR_RING)
 	local dx, dy = cx + math.Clamp(x, -1, 1) * r, cy - math.Clamp(y, -1, 1) * r
 	draw.RoundedBox(4, dx - 4, dy - 4, 8, 8, COLOR_DOT)
-	draw.SimpleText(label, "SteamInputOverlaySmall", cx, cy + r + 8, COLOR_MUTED, TEXT_ALIGN_CENTER, TEXT_ALIGN_TOP)
 end
 
 hook.Add("HUDPaint", "steaminput_overlay", function()
 	if not cv_overlay:GetBool() then return end
 
-	local chipW, chipH, gap, cols = 70, 20, 4, 4
-	local rows = math.ceil(#BUTTON_ORDER / cols)
-	local w = 2 * 12 + 2 * 90 + cols * chipW + (cols - 1) * gap + 16
-	local h = math.max(24 + 100, 30 + rows * (chipH + gap)) + 12
-	local x, y = 24, ScrH() - h - 24
+	if state.controller ~= originController or CurTime() >= nextOriginScan then
+		originController = state.controller
+		nextOriginScan = CurTime() + 2
+		refreshOrigins()
+	end
 
-	draw.RoundedBox(8, x, y, w, h, COLOR_BG)
+	local pad, glyph, rowH, colW = 10, 22, 26, 150
+	local cols = 2
+	local rows = math.ceil(#BUTTON_ORDER / cols)
+	local w = pad * 2 + cols * colW + (cols - 1) * 6
+	local stickH = 86
+	local h = pad + 20 + stickH + rows * rowH + pad
+	local x, y = 24, 24
 
 	if not state.controller then
-		draw.SimpleText("No Steam Input controller", "SteamInputOverlay", x + w / 2, y + h / 2, COLOR_MUTED, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+		draw.RoundedBox(0, x, y, w, 40, COLOR_BG)
+		draw.SimpleText("No Steam Input controller", "SteamInputOverlay", x + w / 2, y + 20, COLOR_MUTED, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
 		return
 	end
 
-	draw.SimpleText(state.typeName or "Controller", "SteamInputOverlay", x + 12, y + 8, COLOR_TEXT)
+	draw.RoundedBox(0, x, y, w, h, COLOR_BG)
+	draw.SimpleText(state.typeName or "Controller", "SteamInputOverlay", x + pad, y + pad, COLOR_TEXT)
 	if not cv_enabled:GetBool() then
-		draw.SimpleText("disabled", "SteamInputOverlaySmall", x + w - 12, y + 10, COLOR_MUTED, TEXT_ALIGN_RIGHT)
+		draw.SimpleText("disabled", "SteamInputOverlaySmall", x + w - pad, y + pad + 1, COLOR_MUTED, TEXT_ALIGN_RIGHT)
 	end
 
-	local stickY = y + 30 + 36
-	drawStick(x + 12 + 45, stickY, 32, state.move.x, state.move.y, "Move")
-	drawStick(x + 12 + 135, stickY, 32, state.look.x / 20, -state.look.y / 20, "Look")
+	local sy = y + pad + 22
+	for i, a in ipairs(ANALOG) do
+		local colX = x + pad + (i - 1) * (colW + 6)
+		local v = state[a.name]
+		drawGlyphs(origins[a.name], colX, sy, glyph)
+		draw.SimpleText(a.label, "SteamInputOverlaySmall", colX + glyph + 6, sy + glyph / 2, COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+		drawStick(colX + colW / 2, sy + glyph + 32, 26, v.x * a.scale, (a.flipY and -v.y or v.y) * a.scale)
+	end
 
-	local chipX0 = x + 12 + 2 * 90 + 16
+	local by = sy + stickH
 	for i, name in ipairs(BUTTON_ORDER) do
 		local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
-		local cx, cy = chipX0 + col * (chipW + gap), y + 30 + row * (chipH + gap)
+		local rx, ry = x + pad + col * (colW + 6), by + row * rowH
 		local on = state.held[name]
-		draw.RoundedBox(4, cx, cy, chipW, chipH, on and COLOR_CHIP_ON or COLOR_CHIP)
-		draw.SimpleText(BUTTONS[name].short, "SteamInputOverlaySmall", cx + chipW / 2, cy + chipH / 2, on and color_black or COLOR_TEXT, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+		draw.RoundedBox(0, rx, ry, colW, rowH - 4, on and COLOR_ROW_ON or COLOR_ROW)
+		local gw = drawGlyphs(origins[name], rx + 2, ry + (rowH - 4 - glyph) / 2, glyph)
+		draw.SimpleText(BUTTONS[name].title, "SteamInputOverlaySmall", rx + gw + 8, ry + (rowH - 4) / 2, on and color_black or COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
 	end
 end)
 
