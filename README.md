@@ -62,6 +62,24 @@ defaults: `a b x y`, `dpad_up/down/left/right`, `lb rb start back`, `lt rt`, `ls
 
 `h` is optional on IsDown/WasPressed/WasReleased
 
+```lua
+hook.Add("Think", "mysweps", function()
+    if steaminput.WasPressed("mysweps", "firemode") then
+        LocalPlayer():GetActiveWeapon():CycleFireMode()
+    end
+end)
+
+hook.Add("CreateMove", "mysweps", function(cmd)
+    local h = steaminput.GetPrimaryController()
+    if h and steaminput.GetAnalogAction(h, "mysweps", "aim") > 0.5 then
+        cmd:AddKey(IN_ATTACK2)
+    end
+    if steaminput.IsDown("mylayer", "inspect") then
+        cmd:AddKey(IN_RELOAD)
+    end
+end)
+```
+
 **layers**
 ```lua
 steaminput.RegisterActionLayer("mylayer", "mysweps", {
@@ -75,6 +93,26 @@ steaminput.DeactivateAllActionSetLayers(h)
 steaminput.GetActiveActionSetLayers(h)
 ```
 
+```lua
+local active = false
+
+hook.Add("Think", "mysweps_layer", function()
+    local h = steaminput.GetPrimaryController()
+    if not h then return end
+
+    local wep = LocalPlayer():GetActiveWeapon()
+    local want = IsValid(wep) and wep.Base == "mysweps_base"
+    if want == active then return end
+
+    active = want
+    if want then
+        steaminput.ActivateActionSetLayer(h, "mylayer")
+    else
+        steaminput.DeactivateActionSetLayer(h, "mylayer")
+    end
+end)
+```
+
 **hooks**
 ```lua
 SteamInputControllerConnected(h, typeName)
@@ -85,10 +123,31 @@ SteamInputModeChanged(mode)
 ```
 
 ```lua
+hook.Add("SteamInputControllerConnected", "mysweps", function(h, typeName)
+    chat.AddText("controller connected: ", typeName)
+    steaminput.SetLEDColor(h, 255, 120, 0)
+end)
+
+hook.Add("SteamInputControllerDisconnected", "mysweps", function(h)
+    chat.AddText("controller disconnected")
+end)
+
 hook.Add("SteamInputActionPressed", "mysweps", function(h, set, action)
-    if set == "mysweps" and action == "firemode" then
+    if set ~= "mysweps" then return end
+    if action == "firemode" then
         LocalPlayer():GetActiveWeapon():CycleFireMode()
+        steaminput.Haptic(h, "click", 0.5)
     end
+end)
+
+hook.Add("SteamInputActionReleased", "mysweps", function(h, set, action)
+    if set == "mysweps" and action == "inspect" then
+        LocalPlayer():GetActiveWeapon():StopInspect()
+    end
+end)
+
+hook.Add("SteamInputModeChanged", "mysweps", function(mode)
+    print("now using", mode)
 end)
 ```
 
