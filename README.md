@@ -28,7 +28,7 @@ require("steaminput")
 |---|---|
 | `steaminput.GetConnectedControllers()` | list of controller handles (strings) |
 | `steaminput.GetInputType(h)` | type name, type id (e.g. `"XBoxOneController", 3`) |
-| `steaminput.TriggerVibration(h, left, right)` | rumble, 0–65535 per side |
+| `steaminput.TriggerVibration(h, left, right, seconds)` | rumble, 0–65535 per side, stops by itself after `seconds` if given |
 | `steaminput.SetLEDColor(h, r, g, b)` / `ResetLEDColor(h)` | LED colour, on controllers that have one |
 | `steaminput.ShowBindingPanel(h)` | opens Steam's binding screen |
 
