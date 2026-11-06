@@ -1,0 +1,39 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install mingw
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: install rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release
+
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-gnu/release/steaminput.dll dist/gmcl_steaminput_win64.dll
+          cp -r example dist/steaminput_example
+          cd dist && zip -r steaminput-example.zip steaminput_example
+
+      - name: release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/gmcl_steaminput_win64.dll
+            dist/steaminput-example.zip
