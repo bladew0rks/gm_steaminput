@@ -52,6 +52,41 @@ defaults can be `a b x y`, `dpad_up/down/left/right`, `lb rb start back`, `lt rt
 
 all registered sets get merged into one manifest with default layouts for every controller type, written to garrysmod/data/steaminput/ and loaded on the next frame. `steaminput.ApplyActions()` does it right away
 
+**hooks**
+```lua
+hook.Add("SteamInputControllerConnected", "x", function(h, typeName) end)
+hook.Add("SteamInputControllerDisconnected", "x", function(h) end)
+hook.Add("SteamInputActionPressed", "x", function(h, set, action) end)
+hook.Add("SteamInputActionReleased", "x", function(h, set, action) end)
+```
+
+connected fires for every controller that's already plugged in when the module loads. pressed/released only fire for button actions, and only while their set is active
+
+**haptics**
+```lua
+steaminput.Haptic(h, "trigger", 0.6, 0.15, "right")   -- effect, strength 0-1, seconds, side
+```
+
+adapts to whatever the controller supports, returns what it ended up using
+
+| Effect | Xbox One/Series | DualSense | Steam Controller/Deck | everything else |
+|---|---|---|---|---|
+| `rumble` | grip motors | grip motors | haptics (via steam) | grip motors |
+| `trigger` | impulse triggers | adaptive trigger vibration | grip motors | grip motors |
+| `click` | short rumble | short rumble | haptic pulse | short rumble |
+| `resistance` | nothing | adaptive trigger resistance | nothing | nothing |
+
+side is `left`, `right` or `both` (default). strength 0 turns an effect off
+
+raw versions if you want them:
+| Function | Does |
+|---|---|
+| `steaminput.TriggerVibrationExtended(h, left, right, leftTrigger, rightTrigger, seconds)` | xbox impulse triggers, 0–65535 |
+| `steaminput.TriggerHapticPulse(h, side, intensity, gainDB)` | steam controller/deck haptic pulse, intensity 0–255 |
+| `steaminput.SetTriggerEffect(h, side, mode, a, b, c, seconds)` | dualsense adaptive triggers, see below |
+
+trigger effect modes: `off`, `feedback` (position 0–9, strength 0–8), `weapon` (start 2–7, end, strength 0–8), `vibration` (position 0–9, amplitude 0–8, frequency)
+
 **glyphs**
 ```lua
 for _, origin in ipairs(steaminput.GetDigitalActionOrigins(h, "mysweps", "firemode")) do
