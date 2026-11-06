@@ -1,11 +1,3 @@
-if not util.IsBinaryModuleInstalled("steaminput") then return end
-
-local ok, err = pcall(require, "steaminput")
-if not ok then
-	ErrorNoHalt("[steaminput] failed to load module: " .. tostring(err) .. "\n")
-	return
-end
-
 local SET = "base"
 
 local BUTTONS = {
@@ -31,7 +23,7 @@ steaminput.RegisterActionSet(SET, {
 	title = "On Foot",
 	analog = {
 		move = { title = "Move", mode = "joystick_move", default = "left_stick" },
-		look = { title = "Look", mode = "absolute_mouse", default = "right_stick" },
+		look = { title = "Look", mode = "absolute_mouse", default = { "right_stick", "gyro" } },
 	},
 	buttons = buttonDefs,
 })
@@ -70,20 +62,6 @@ local function cycleWeapon(ply, dir)
 	return weapons[1]
 end
 
-hook.Add("SteamInputControllerConnected", "steaminput_base", function(h, typeName)
-	if state.controller then return end
-	state.controller, state.typeName = h, typeName
-end)
-
-hook.Add("SteamInputControllerDisconnected", "steaminput_base", function(h)
-	if h ~= state.controller then return end
-	state.controller, state.typeName = nil, nil
-	state.held, state.queued = {}, {}
-
-	local other = steaminput.GetConnectedControllers()[1]
-	if other then state.controller, state.typeName = other, (steaminput.GetInputType(other)) end
-end)
-
 local PRESS_ACTIONS = {
 	menu = function()
 		if gui.IsGameUIVisible() then gui.HideGameUI() else gui.ActivateGameUI() end
@@ -105,9 +83,13 @@ hook.Add("SteamInputActionReleased", "steaminput_base", function(h, set, action)
 end)
 
 hook.Add("Think", "steaminput_base", function()
-	local h = state.controller
+	local h = steaminput.GetPrimaryController()
+	if h ~= state.controller then
+		state.controller, state.typeName = h, h and (steaminput.GetInputType(h)) or nil
+		state.held, state.queued = {}, {}
+	end
 	if not h then return end
-	steaminput.ActivateActionSet(h, SET)
+	if steaminput.GetCurrentActionSet(h) ~= SET then steaminput.ActivateActionSet(h, SET) end
 	state.move.x, state.move.y = steaminput.GetAnalogAction(h, SET, "move")
 	state.look.x, state.look.y = steaminput.GetAnalogAction(h, SET, "look")
 end)
@@ -255,9 +237,13 @@ hook.Add("HUDPaint", "steaminput_overlay", function()
 	end
 
 	draw.RoundedBox(0, x, y, w, h, COLOR_BG)
-	draw.SimpleText(state.typeName or "Controller", "SteamInputOverlay", x + pad, y + pad, COLOR_TEXT)
-	if not cv_enabled:GetBool() then
-		draw.SimpleText("disabled", "SteamInputOverlaySmall", x + w - pad, y + pad + 1, COLOR_MUTED, TEXT_ALIGN_RIGHT)
+	local header = (state.typeName or "Controller") .. (cv_enabled:GetBool() and "" or " (disabled)")
+	draw.SimpleText(header, "SteamInputOverlay", x + pad, y + pad, COLOR_TEXT)
+
+	local gyro = steaminput.GetMotionData(state.controller).gyro
+	if not gyro:IsZero() then
+		local text = string.format("gyro %4d %4d %4d", gyro.x, gyro.y, gyro.z)
+		draw.SimpleText(text, "SteamInputOverlaySmall", x + w - pad, y + pad + 1, COLOR_MUTED, TEXT_ALIGN_RIGHT)
 	end
 
 	local sy = y + pad + 22

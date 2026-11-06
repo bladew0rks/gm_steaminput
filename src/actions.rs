@@ -19,6 +19,12 @@ const CONTROLLER_TYPES: &[&str] = &[
     "controller_switch_joycon_pair",
     "controller_neptune",
     "controller_steamcontroller_gordon",
+    "controller_triton",
+    "controller_steamos_handheld",
+    "controller_legion_go",
+    "controller_legion_go_s",
+    "controller_rog_ally",
+    "controller_zotac_zone",
     "controller_generic",
 ];
 
@@ -39,6 +45,7 @@ pub struct Action {
 #[derive(Default)]
 pub struct ActionSet {
     pub title: String,
+    pub parent: Option<String>,
     pub actions: BTreeMap<String, Action>,
 }
 
@@ -83,6 +90,7 @@ fn analog_source(kind: Kind, name: &str) -> Option<(&'static str, &'static str)>
         (Kind::Stick, "right_joystick" | "right_stick") => Some(("right_joystick", "joystick_move")),
         (Kind::Mouse, "joystick" | "left_stick") => Some(("joystick", "joystick_mouse")),
         (Kind::Mouse, "right_joystick" | "right_stick") => Some(("right_joystick", "joystick_mouse")),
+        (Kind::Mouse, "gyro") => Some(("gyro", "gyro_to_mouse")),
         _ => None,
     }
 }
@@ -184,7 +192,7 @@ impl Vdf {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Group {
     mode: &'static str,
     inputs: BTreeMap<&'static str, Vec<String>>,
@@ -214,6 +222,47 @@ fn build_groups(set_name: &str, set: &ActionSet) -> BTreeMap<&'static str, Group
     groups
 }
 
+fn groups_for(sets: &BTreeMap<String, ActionSet>, name: &str, set: &ActionSet) -> BTreeMap<&'static str, Group> {
+    let own = build_groups(name, set);
+    let Some((parent_name, parent)) = set.parent.as_ref().and_then(|p| sets.get_key_value(p)) else { return own };
+    let inherited = build_groups(parent_name, parent);
+
+    own.into_iter()
+        .map(|(source, layer)| {
+            let mut group = inherited.get(source).cloned().unwrap_or_default();
+            if layer.gameaction.is_some() || group.mode.is_empty() {
+                group.mode = layer.mode;
+            }
+            if layer.gameaction.is_some() {
+                group.gameaction = layer.gameaction;
+            }
+            group.inputs.extend(layer.inputs);
+            (source, group)
+        })
+        .collect()
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Button => "button",
+            Kind::Trigger => "trigger",
+            Kind::Stick => "stick",
+            Kind::Mouse => "mouse",
+        }
+    }
+}
+
+pub fn actions_of(set: &str) -> Option<Vec<(String, Kind)>> {
+    let reg = REGISTRY.lock().unwrap();
+    let set = reg.sets.get(set)?;
+    Some(set.actions.iter().map(|(name, a)| (name.clone(), a.kind)).collect())
+}
+
+pub fn set_names() -> Vec<String> {
+    REGISTRY.lock().unwrap().sets.keys().cloned().collect()
+}
+
 fn remap_for_controller(controller: &str, source: &'static str, mode: &'static str) -> (&'static str, &'static str) {
     match (controller, source, mode) {
         ("controller_steamcontroller_gordon", "right_joystick", "joystick_mouse") => ("right_trackpad", "absolute_mouse"),
@@ -237,7 +286,7 @@ fn controller_config(controller: &str, sets: &BTreeMap<String, ActionSet>, revis
 
     for (set_name, set) in sets {
         let mut bindings = Vec::new();
-        for (source, group) in build_groups(set_name, set) {
+        for (source, group) in groups_for(sets, set_name, set) {
             let (source, mode) = remap_for_controller(controller, source, group.mode);
             let id = next_id;
             next_id += 1;
@@ -302,37 +351,47 @@ fn manifest(sets: &BTreeMap<String, ActionSet>) -> String {
         }
     });
 
-    v.block("actions", |v| {
-        for (set_name, set) in sets {
-            let set_token = format!("Set_{set_name}");
-            loc.push((set_token.clone(), set.title.clone()));
-
-            v.block(set_name, |v| {
-                v.kv("title", &format!("#{set_token}"));
-                v.kv("legacy_set", "0");
-
-                let mut section = |v: &mut Vdf, name: &str, kinds: &[Kind]| {
-                    v.block(name, |v| {
-                        for (action, def) in set.actions.iter().filter(|(_, a)| kinds.contains(&a.kind)) {
-                            let steam_name = steam_action_name(set_name, action);
-                            let token = format!("Action_{steam_name}");
-                            loc.push((token.clone(), def.title.clone()));
-                            match def.kind {
-                                Kind::Stick | Kind::Mouse => v.block(&steam_name, |v| {
-                                    v.kv("title", &format!("#{token}"));
-                                    v.kv("input_mode", if def.kind == Kind::Mouse { "absolute_mouse" } else { "joystick_move" });
-                                }),
-                                _ => v.kv(&steam_name, &format!("#{token}")),
-                            }
-                        }
-                    });
-                };
-                section(v, "StickPadGyro", &[Kind::Stick, Kind::Mouse]);
-                section(v, "AnalogTrigger", &[Kind::Trigger]);
-                section(v, "Button", &[Kind::Button]);
-            });
+    let has_layers = sets.values().any(|s| s.parent.is_some());
+    for (block, layers) in [("actions", false), ("action_layers", true)] {
+        if layers && !has_layers {
+            continue;
         }
-    });
+        v.block(block, |v| {
+            for (set_name, set) in sets.iter().filter(|(_, s)| s.parent.is_some() == layers) {
+                let set_token = format!("Set_{set_name}");
+                loc.push((set_token.clone(), set.title.clone()));
+
+                v.block(set_name, |v| {
+                    v.kv("title", &format!("#{set_token}"));
+                    v.kv("legacy_set", "0");
+                    if let Some(parent) = &set.parent {
+                        v.kv("set_layer", "1");
+                        v.kv("parent_set_name", parent);
+                    }
+
+                    let mut section = |v: &mut Vdf, name: &str, kinds: &[Kind]| {
+                        v.block(name, |v| {
+                            for (action, def) in set.actions.iter().filter(|(_, a)| kinds.contains(&a.kind)) {
+                                let steam_name = steam_action_name(set_name, action);
+                                let token = format!("Action_{steam_name}");
+                                loc.push((token.clone(), def.title.clone()));
+                                match def.kind {
+                                    Kind::Stick | Kind::Mouse => v.block(&steam_name, |v| {
+                                        v.kv("title", &format!("#{token}"));
+                                        v.kv("input_mode", if def.kind == Kind::Mouse { "absolute_mouse" } else { "joystick_move" });
+                                    }),
+                                    _ => v.kv(&steam_name, &format!("#{token}")),
+                                }
+                            }
+                        });
+                    };
+                    section(v, "StickPadGyro", &[Kind::Stick, Kind::Mouse]);
+                    section(v, "AnalogTrigger", &[Kind::Trigger]);
+                    section(v, "Button", &[Kind::Button]);
+                });
+            }
+        });
+    }
 
     v.block("localization", |v| v.block("english", |v| loc.iter().for_each(|(k, val)| v.kv(k, val))));
     v.close();
@@ -357,6 +416,14 @@ pub fn write_files() -> Result<String, String> {
     let reg = REGISTRY.lock().unwrap();
     if reg.sets.is_empty() {
         return Err("no action sets registered".into());
+    }
+    for (name, set) in &reg.sets {
+        let Some(parent) = &set.parent else { continue };
+        match reg.sets.get(parent) {
+            Some(p) if p.parent.is_none() => {}
+            Some(_) => return Err(format!("layer '{name}' has another layer '{parent}' as its parent")),
+            None => return Err(format!("layer '{name}' has unknown parent set '{parent}'")),
+        }
     }
 
     let dir = garrysmod_dir()?.join("data").join("steaminput");

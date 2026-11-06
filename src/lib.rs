@@ -128,14 +128,29 @@ unsafe fn fire(lua: State, event: events::Event) {
     lua.pop();
 }
 
+unsafe fn register(lua: State, name: String, parent: Option<String>, table: i32, func: &str) -> i32 {
+    lua.check_table(table);
+    let result = register::parse_action_set(lua, table, &name).and_then(|mut set| {
+        set.parent = parent;
+        actions::register(&name, set)
+    });
+    if let Err(e) = result {
+        lua.error(format!("[steaminput] {func}('{name}'): {e}"));
+    }
+    0
+}
+
 #[lua_function]
 unsafe fn register_action_set(lua: State) -> i32 {
     let name = lua.check_string(1).into_owned();
-    lua.check_table(2);
-    if let Err(e) = register::parse_action_set(lua, 2, &name).and_then(|set| actions::register(&name, set)) {
-        lua.error(format!("[steaminput] RegisterActionSet('{name}'): {e}"));
-    }
-    0
+    register(lua, name, None, 2, "RegisterActionSet")
+}
+
+#[lua_function]
+unsafe fn register_action_layer(lua: State) -> i32 {
+    let name = lua.check_string(1).into_owned();
+    let parent = lua.check_string(2).into_owned();
+    register(lua, name, Some(parent), 3, "RegisterActionLayer")
 }
 
 #[lua_function]
@@ -150,6 +165,64 @@ unsafe fn apply_actions_now(lua: State) -> i32 {
             2
         }
     }
+}
+
+unsafe fn opt_handle(lua: State, arg: i32) -> Option<InputHandle> {
+    if lua.is_none_or_nil(arg) { events::primary() } else { Some(check_handle(lua, arg)) }
+}
+
+unsafe fn check_set_action(lua: State) -> (String, String) {
+    (lua.check_string(1).into_owned(), lua.check_string(2).into_owned())
+}
+
+#[lua_function]
+unsafe fn get_primary_controller(lua: State) -> i32 {
+    match events::primary() {
+        Some(h) => lua.push_string(&h.to_string()),
+        None => lua.push_nil(),
+    }
+    1
+}
+
+#[lua_function]
+unsafe fn is_down(lua: State) -> i32 {
+    let (set, action) = check_set_action(lua);
+    let down = opt_handle(lua, 3).is_some_and(|h| events::is_down(h, &set, &action));
+    lua.push_boolean(down);
+    1
+}
+
+unsafe fn changed(lua: State, pressed: bool) -> i32 {
+    let (set, action) = check_set_action(lua);
+    let changed = opt_handle(lua, 3).is_some_and(|h| events::changed_this_frame(h, &set, &action, pressed));
+    lua.push_boolean(changed);
+    1
+}
+
+#[lua_function]
+unsafe fn was_pressed(lua: State) -> i32 {
+    changed(lua, true)
+}
+
+#[lua_function]
+unsafe fn was_released(lua: State) -> i32 {
+    changed(lua, false)
+}
+
+#[lua_function]
+unsafe fn get_actions(lua: State) -> i32 {
+    let set = lua.check_string(1).into_owned();
+    let Some(list) = actions::actions_of(&set) else {
+        lua.push_nil();
+        return 1;
+    };
+    lua.create_table(0, list.len() as i32);
+    for (name, kind) in list {
+        lua.push_string(&name);
+        lua.push_string(kind.name());
+        lua.set_table(-3);
+    }
+    1
 }
 
 #[lua_function]
@@ -253,6 +326,49 @@ unsafe fn activate_action_set(lua: State) -> i32 {
     1
 }
 
+unsafe fn set_layer(lua: State, active: bool) -> i32 {
+    let handle = check_handle(lua, 1);
+    let layer = lua.check_string(2).into_owned();
+    lua.push_boolean(api(lua, |api| api.set_layer(handle, &layer, active)));
+    1
+}
+
+#[lua_function]
+unsafe fn activate_action_set_layer(lua: State) -> i32 {
+    set_layer(lua, true)
+}
+
+#[lua_function]
+unsafe fn deactivate_action_set_layer(lua: State) -> i32 {
+    set_layer(lua, false)
+}
+
+#[lua_function]
+unsafe fn deactivate_all_action_set_layers(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    api(lua, |api| api.deactivate_all_layers(handle));
+    0
+}
+
+#[lua_function]
+unsafe fn get_active_action_set_layers(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let names = actions::set_names();
+    let layers = api(lua, |api| api.active_layers(handle, &names));
+    push_list(lua, &layers, |name| lua.push_string(name))
+}
+
+#[lua_function]
+unsafe fn get_current_action_set(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let names = actions::set_names();
+    match api(lua, |api| api.current_action_set(handle, &names)) {
+        Some(name) => lua.push_string(&name),
+        None => lua.push_nil(),
+    }
+    1
+}
+
 #[lua_function]
 unsafe fn get_digital_action(lua: State) -> i32 {
     let (handle, _, action) = check_action(lua);
@@ -260,6 +376,13 @@ unsafe fn get_digital_action(lua: State) -> i32 {
     lua.push_boolean(data.state);
     lua.push_boolean(data.active);
     2
+}
+
+#[lua_function]
+unsafe fn stop_analog_action_momentum(lua: State) -> i32 {
+    let (handle, _, action) = check_action(lua);
+    api(lua, |api| api.stop_analog_momentum(handle, &action));
+    0
 }
 
 #[lua_function]
@@ -302,6 +425,34 @@ unsafe fn get_glyph(lua: State) -> i32 {
     1
 }
 
+unsafe fn push_vector(lua: State, v: [f32; 3], scale: f64) {
+    lua.get_global(lua_string!("Vector"));
+    for c in v {
+        lua.push_number(c as f64 * scale);
+    }
+    lua.call(3, 1);
+}
+
+#[lua_function]
+unsafe fn get_motion_data(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let data = api(lua, |api| api.motion_data(handle));
+    let int16 = i16::MAX as f64;
+
+    lua.create_table(0, 3);
+    lua.create_table(0, 4);
+    for (key, value) in [lua_string!("x"), lua_string!("y"), lua_string!("z"), lua_string!("w")].into_iter().zip(data.quat) {
+        lua.push_number(value as f64);
+        lua.set_field(-2, key);
+    }
+    lua.set_field(-2, lua_string!("orientation"));
+    push_vector(lua, data.accel, 2.0 / int16);
+    lua.set_field(-2, lua_string!("accel"));
+    push_vector(lua, data.gyro, 2000.0 / int16);
+    lua.set_field(-2, lua_string!("gyro"));
+    1
+}
+
 #[lua_function]
 unsafe fn get_origin_name(lua: State) -> i32 {
     let origin = lua.check_integer(1) as i32;
@@ -318,8 +469,13 @@ unsafe fn gmod13_open(lua: State) -> i32 {
         lua.error(format!("[steaminput] {e}"));
     }
 
-    let functions: [(LuaString, LuaFunction); 19] = [
+    let functions: [(LuaString, LuaFunction); 32] = [
         (lua_string!("GetConnectedControllers"), get_connected_controllers),
+        (lua_string!("GetPrimaryController"), get_primary_controller),
+        (lua_string!("IsDown"), is_down),
+        (lua_string!("WasPressed"), was_pressed),
+        (lua_string!("WasReleased"), was_released),
+        (lua_string!("GetActions"), get_actions),
         (lua_string!("GetInputType"), get_input_type),
         (lua_string!("TriggerVibration"), trigger_vibration),
         (lua_string!("TriggerVibrationExtended"), trigger_vibration_extended),
@@ -332,12 +488,20 @@ unsafe fn gmod13_open(lua: State) -> i32 {
         (lua_string!("RegisterActionSet"), register_action_set),
         (lua_string!("ApplyActions"), apply_actions_now),
         (lua_string!("ActivateActionSet"), activate_action_set),
+        (lua_string!("GetCurrentActionSet"), get_current_action_set),
+        (lua_string!("RegisterActionLayer"), register_action_layer),
+        (lua_string!("ActivateActionSetLayer"), activate_action_set_layer),
+        (lua_string!("DeactivateActionSetLayer"), deactivate_action_set_layer),
+        (lua_string!("DeactivateAllActionSetLayers"), deactivate_all_action_set_layers),
+        (lua_string!("GetActiveActionSetLayers"), get_active_action_set_layers),
         (lua_string!("GetDigitalAction"), get_digital_action),
         (lua_string!("GetAnalogAction"), get_analog_action),
+        (lua_string!("StopAnalogActionMomentum"), stop_analog_action_momentum),
         (lua_string!("GetDigitalActionOrigins"), get_digital_action_origins),
         (lua_string!("GetAnalogActionOrigins"), get_analog_action_origins),
         (lua_string!("GetGlyph"), get_glyph),
         (lua_string!("GetOriginName"), get_origin_name),
+        (lua_string!("GetMotionData"), get_motion_data),
     ];
 
     lua.new_table();
@@ -356,6 +520,13 @@ unsafe fn gmod13_open(lua: State) -> i32 {
     lua.push_function(run_frame);
     lua.call(3, 0);
     lua.pop();
+
+    match lua.load_buffer(include_bytes!("util.lua"), lua_string!("=steaminput/util.lua")) {
+        Ok(()) => {
+            lua.pcall_ignore(0, 0);
+        }
+        Err(e) => lua.error(format!("[steaminput] failed to load util.lua: {e:?}")),
+    }
 
     lua.get_global(lua_string!("print"));
     lua.push_string(concat!("[steaminput] loaded v", env!("CARGO_PKG_VERSION")));

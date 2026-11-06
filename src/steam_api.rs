@@ -8,6 +8,7 @@ use libloading::os::windows::Library;
 const STEAM_API_DLL: &str = "steam_api64.dll";
 const MAX_CONTROLLERS: usize = 16;
 const MAX_ORIGINS: usize = 8;
+const MAX_ACTIVE_LAYERS: usize = 16;
 
 pub type InputHandle = u64;
 pub const ALL_CONTROLLERS: InputHandle = u64::MAX;
@@ -27,6 +28,14 @@ pub struct AnalogActionData {
     pub x: f32,
     pub y: f32,
     pub active: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MotionData {
+    pub quat: [f32; 4],
+    pub accel: [f32; 3],
+    pub gyro: [f32; 3],
 }
 
 #[repr(C)]
@@ -109,10 +118,17 @@ steam_fns! {
     digital_action_handle = "GetDigitalActionHandle": fn(*const c_char) -> u64;
     analog_action_handle = "GetAnalogActionHandle": fn(*const c_char) -> u64;
     activate_action_set = "ActivateActionSet": fn(InputHandle, u64);
+    current_action_set = "GetCurrentActionSet": fn(InputHandle) -> u64;
+    activate_layer = "ActivateActionSetLayer": fn(InputHandle, u64);
+    deactivate_layer = "DeactivateActionSetLayer": fn(InputHandle, u64);
+    deactivate_all_layers = "DeactivateAllActionSetLayers": fn(InputHandle);
+    active_layers = "GetActiveActionSetLayers": fn(InputHandle, *mut u64) -> i32;
     digital_action_data = "GetDigitalActionData": fn(InputHandle, u64) -> DigitalActionData;
     analog_action_data = "GetAnalogActionData": fn(InputHandle, u64) -> AnalogActionData;
+    stop_analog_momentum = "StopAnalogActionMomentum": fn(InputHandle, u64);
     digital_action_origins = "GetDigitalActionOrigins": fn(InputHandle, u64, u64, *mut i32) -> i32;
     analog_action_origins = "GetAnalogActionOrigins": fn(InputHandle, u64, u64, *mut i32) -> i32;
+    motion_data = "GetMotionData": fn(InputHandle) -> MotionData;
     glyph_png = "GetGlyphPNGForActionOrigin": fn(i32, i32, u32) -> *const c_char;
     origin_name = "GetStringForActionOrigin": fn(i32) -> *const c_char;
 }
@@ -271,6 +287,35 @@ impl SteamInput {
         true
     }
 
+    pub fn set_layer(&mut self, controller: InputHandle, layer: &str, active: bool) -> bool {
+        let Some(layer) = self.handle(HandleKind::ActionSet, layer) else { return false };
+        let f = if active { self.fns.activate_layer } else { self.fns.deactivate_layer };
+        unsafe { f(self.iface, controller, layer) };
+        true
+    }
+
+    pub fn deactivate_all_layers(&self, controller: InputHandle) {
+        unsafe { (self.fns.deactivate_all_layers)(self.iface, controller) }
+    }
+
+    fn set_name(&mut self, handle: u64, candidates: &[String]) -> Option<String> {
+        candidates.iter().find(|name| self.handle(HandleKind::ActionSet, name) == Some(handle)).cloned()
+    }
+
+    pub fn current_action_set(&mut self, controller: InputHandle, candidates: &[String]) -> Option<String> {
+        let handle = unsafe { (self.fns.current_action_set)(self.iface, controller) };
+        self.set_name(handle, candidates)
+    }
+
+    pub fn active_layers(&mut self, controller: InputHandle, candidates: &[String]) -> Vec<String> {
+        let mut handles = [0u64; MAX_ACTIVE_LAYERS];
+        let count = unsafe { (self.fns.active_layers)(self.iface, controller, handles.as_mut_ptr()) };
+        handles[..count.clamp(0, MAX_ACTIVE_LAYERS as i32) as usize]
+            .iter()
+            .filter_map(|&h| self.set_name(h, candidates))
+            .collect()
+    }
+
     pub fn digital_action(&mut self, controller: InputHandle, action: &str) -> DigitalActionData {
         match self.handle(HandleKind::Digital, action) {
             Some(action) => unsafe { (self.fns.digital_action_data)(self.iface, controller, action) },
@@ -285,6 +330,12 @@ impl SteamInput {
         }
     }
 
+    pub fn stop_analog_momentum(&mut self, controller: InputHandle, action: &str) {
+        if let Some(action) = self.handle(HandleKind::Analog, action) {
+            unsafe { (self.fns.stop_analog_momentum)(self.iface, controller, action) }
+        }
+    }
+
     pub fn action_origins(&mut self, controller: InputHandle, set: &str, action: &str, analog: bool) -> Vec<i32> {
         let (kind, lookup) = match analog {
             true => (HandleKind::Analog, self.fns.analog_action_origins),
@@ -296,6 +347,10 @@ impl SteamInput {
         let mut origins = [0i32; MAX_ORIGINS];
         let count = unsafe { lookup(self.iface, controller, set, action, origins.as_mut_ptr()) };
         origins[..count.clamp(0, MAX_ORIGINS as i32) as usize].to_vec()
+    }
+
+    pub fn motion_data(&self, handle: InputHandle) -> MotionData {
+        unsafe { (self.fns.motion_data)(self.iface, handle) }
     }
 
     pub fn glyph_png(&self, origin: i32, size: i32, flags: u32) -> Option<String> {
@@ -336,6 +391,10 @@ pub fn input_type_name(kind: i32) -> &'static str {
         12 => "PS3Controller",
         13 => "PS5Controller",
         14 => "SteamDeckController",
+        15 => "SteamOSHandheld",
+        16 => "Switch2ProController",
+        17 => "SteamController2026",
+        18 => "SteamFrameControllerPair",
         _ => "Unknown",
     }
 }

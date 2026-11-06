@@ -1,6 +1,6 @@
 GMOD_DIR ?= $(HOME)/.local/share/Steam/steamapps/common/GarrysMod
 BIN_DIR  := $(GMOD_DIR)/garrysmod/lua/bin
-ADDON_DIR := $(GMOD_DIR)/garrysmod/addons/steaminput
+EXAMPLE_DIR := $(GMOD_DIR)/garrysmod/addons/steaminput_example
 
 TARGET   := x86_64-pc-windows-gnu
 PROFILE  ?= release
@@ -12,29 +12,29 @@ endif
 
 BUILT := target/$(TARGET)/$(PROFILE)/steaminput.dll
 
-.PHONY: all build install addon debug clean uninstall
+.PHONY: all build install example debug clean uninstall
 
 all: install
 
 build:
 	cargo build $(CARGO_FLAGS)
 
-install: build addon
+install: build example
 	@test -d "$(BIN_DIR)" || mkdir -p "$(BIN_DIR)"
 	cp "$(BUILT)" "$(BIN_DIR)/.$(MODULE).tmp"
 	mv -f "$(BIN_DIR)/.$(MODULE).tmp" "$(BIN_DIR)/$(MODULE)"
 	@echo "Installed $(BIN_DIR)/$(MODULE)"
 
-addon:
-	@if [ -e "$(ADDON_DIR)" ] && [ ! -L "$(ADDON_DIR)" ]; then echo "$(ADDON_DIR) exists and is not a symlink"; exit 1; fi
-	ln -sfn "$(CURDIR)/addon" "$(ADDON_DIR)"
+example:
+	@if [ -e "$(EXAMPLE_DIR)" ] && [ ! -L "$(EXAMPLE_DIR)" ]; then echo "$(EXAMPLE_DIR) exists and is not a symlink"; exit 1; fi
+	ln -sfn "$(CURDIR)/example" "$(EXAMPLE_DIR)"
 
 debug:
 	$(MAKE) install PROFILE=debug
 
 uninstall:
 	rm -f "$(BIN_DIR)/$(MODULE)"
-	@if [ -L "$(ADDON_DIR)" ]; then rm "$(ADDON_DIR)"; fi
+	@if [ -L "$(EXAMPLE_DIR)" ]; then rm "$(EXAMPLE_DIR)"; fi
 
 clean:
 	cargo clean

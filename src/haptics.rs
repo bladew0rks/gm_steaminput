@@ -4,6 +4,7 @@ const STEAM_CONTROLLER: i32 = 1;
 const XBOX_ONE: i32 = 3;
 const PS5: i32 = 13;
 const STEAM_DECK: i32 = 14;
+const STEAM_CONTROLLER_2026: i32 = 17;
 
 const MODE_OFF: i32 = 0;
 const MODE_FEEDBACK: i32 = 1;
@@ -106,7 +107,7 @@ pub fn haptic(api: &mut SteamInput, handle: InputHandle, effect: &str, strength:
         }
         ("trigger", _) => rumble(api, seconds),
 
-        ("click", STEAM_CONTROLLER | STEAM_DECK) => {
+        ("click", STEAM_CONTROLLER | STEAM_DECK | STEAM_CONTROLLER_2026) => {
             api.simple_haptic_event(handle, side.haptic_location(), scale(strength, 255.0) as u8, 0);
             "haptic"
         }
