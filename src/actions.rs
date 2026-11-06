@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 const MAX_ANALOG_ACTIONS: usize = 16;
-const MAX_DIGITAL_ACTIONS: usize = 128;
+const MAX_BUTTON_ACTIONS: usize = 128;
 
 const CONTROLLER_TYPES: &[&str] = &[
     "controller_xbox360",
@@ -23,52 +23,23 @@ const CONTROLLER_TYPES: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum AnalogMode {
-    JoystickMove,
-    AbsoluteMouse,
-}
-
-impl AnalogMode {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "joystick_move" => Some(Self::JoystickMove),
-            "absolute_mouse" => Some(Self::AbsoluteMouse),
-            _ => None,
-        }
-    }
-
-    fn input_mode(self) -> &'static str {
-        match self {
-            Self::JoystickMove => "joystick_move",
-            Self::AbsoluteMouse => "absolute_mouse",
-        }
-    }
-
-    fn group_mode(self) -> &'static str {
-        match self {
-            Self::JoystickMove => "joystick_move",
-            Self::AbsoluteMouse => "joystick_mouse",
-        }
-    }
+pub enum Kind {
+    Button,
+    Trigger,
+    Stick,
+    Mouse,
 }
 
 pub struct Action {
     pub title: String,
-    pub defaults: Vec<String>,
-}
-
-pub struct AnalogAction {
-    pub title: String,
-    pub mode: AnalogMode,
+    pub kind: Kind,
     pub defaults: Vec<String>,
 }
 
 #[derive(Default)]
 pub struct ActionSet {
     pub title: String,
-    pub buttons: BTreeMap<String, Action>,
-    pub analog: BTreeMap<String, AnalogAction>,
-    pub triggers: BTreeMap<String, Action>,
+    pub actions: BTreeMap<String, Action>,
 }
 
 struct Registry {
@@ -76,19 +47,10 @@ struct Registry {
     dirty: bool,
 }
 
-static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
-    sets: BTreeMap::new(),
-    dirty: false,
-});
+static REGISTRY: Mutex<Registry> = Mutex::new(Registry { sets: BTreeMap::new(), dirty: false });
 
-struct DigitalSource {
-    group: &'static str,
-    mode: &'static str,
-    input: &'static str,
-}
-
-fn digital_source(name: &str) -> Option<DigitalSource> {
-    let (group, mode, input) = match name {
+fn button_source(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match name {
         "a" | "button_a" => ("button_diamond", "four_buttons", "button_a"),
         "b" | "button_b" => ("button_diamond", "four_buttons", "button_b"),
         "x" | "button_x" => ("button_diamond", "four_buttons", "button_x"),
@@ -110,22 +72,17 @@ fn digital_source(name: &str) -> Option<DigitalSource> {
         "ls" | "left_stick_click" => ("joystick", "joystick_move", "click"),
         "rs" | "right_stick_click" => ("right_joystick", "joystick_move", "click"),
         _ => return None,
-    };
-    Some(DigitalSource { group, mode, input })
+    })
 }
 
-fn stick_source(name: &str) -> Option<&'static str> {
-    match name {
-        "joystick" | "left_stick" => Some("joystick"),
-        "right_joystick" | "right_stick" => Some("right_joystick"),
-        _ => None,
-    }
-}
-
-fn trigger_source(name: &str) -> Option<&'static str> {
-    match name {
-        "lt" | "left_trigger" => Some("left_trigger"),
-        "rt" | "right_trigger" => Some("right_trigger"),
+fn analog_source(kind: Kind, name: &str) -> Option<(&'static str, &'static str)> {
+    match (kind, name) {
+        (Kind::Trigger, "lt" | "left_trigger") => Some(("left_trigger", "trigger")),
+        (Kind::Trigger, "rt" | "right_trigger") => Some(("right_trigger", "trigger")),
+        (Kind::Stick, "joystick" | "left_stick") => Some(("joystick", "joystick_move")),
+        (Kind::Stick, "right_joystick" | "right_stick") => Some(("right_joystick", "joystick_move")),
+        (Kind::Mouse, "joystick" | "left_stick") => Some(("joystick", "joystick_mouse")),
+        (Kind::Mouse, "right_joystick" | "right_stick") => Some(("right_joystick", "joystick_mouse")),
         _ => None,
     }
 }
@@ -140,46 +97,23 @@ fn valid_identifier(name: &str) -> bool {
 
 fn validate(name: &str, set: &ActionSet) -> Result<(), String> {
     if !valid_identifier(name) {
-        return Err(format!("action set name '{name}' may only contain letters, digits and underscores"));
+        return Err(format!("set name '{name}' may only contain letters, digits and underscores"));
     }
 
-    let mut analog_sources = BTreeMap::new();
-    let mut check_analog = |action: &str, source: &'static str| match analog_sources.insert(source, action.to_owned()) {
-        Some(other) => Err(format!("'{action}' and '{other}' both default to '{source}'")),
-        None => Ok(()),
-    };
-
-    for (action, def) in &set.buttons {
+    let mut taken = BTreeMap::new();
+    for (action, def) in &set.actions {
         if !valid_identifier(action) {
-            return Err(format!("button action name '{action}' is invalid"));
+            return Err(format!("action name '{action}' may only contain letters, digits and underscores"));
         }
         for d in &def.defaults {
-            digital_source(d).ok_or_else(|| format!("button '{action}': unknown default '{d}'"))?;
-        }
-    }
-    for (action, def) in &set.analog {
-        if !valid_identifier(action) {
-            return Err(format!("analog action name '{action}' is invalid"));
-        }
-        for d in &def.defaults {
-            let source = stick_source(d).ok_or_else(|| format!("analog '{action}': unknown default '{d}'"))?;
-            check_analog(action, source)?;
-        }
-    }
-    for (action, def) in &set.triggers {
-        if !valid_identifier(action) {
-            return Err(format!("trigger action name '{action}' is invalid"));
-        }
-        for d in &def.defaults {
-            let source = trigger_source(d).ok_or_else(|| format!("trigger '{action}': unknown default '{d}'"))?;
-            check_analog(action, source)?;
-        }
-    }
-
-    let names: Vec<&String> = set.buttons.keys().chain(set.analog.keys()).chain(set.triggers.keys()).collect();
-    for (i, a) in names.iter().enumerate() {
-        if names[i + 1..].contains(a) {
-            return Err(format!("action '{a}' is defined more than once"));
+            if def.kind == Kind::Button {
+                button_source(d).ok_or_else(|| format!("'{action}': unknown default '{d}'"))?;
+                continue;
+            }
+            let (group, _) = analog_source(def.kind, d).ok_or_else(|| format!("'{action}': unknown default '{d}'"))?;
+            if let Some(other) = taken.insert(group, action) {
+                return Err(format!("'{action}' and '{other}' both default to '{group}'"));
+            }
         }
     }
     Ok(())
@@ -189,17 +123,16 @@ pub fn register(name: &str, set: ActionSet) -> Result<(), String> {
     validate(name, &set)?;
     let mut reg = REGISTRY.lock().unwrap();
 
-    let others = reg.sets.iter().filter(|(n, _)| n.as_str() != name).map(|(_, s)| s);
-    let (mut analog, mut digital) = (set.analog.len() + set.triggers.len(), set.buttons.len());
-    for s in others {
-        analog += s.analog.len() + s.triggers.len();
-        digital += s.buttons.len();
-    }
+    let others = reg.sets.iter().filter(|(n, _)| *n != name).flat_map(|(_, s)| s.actions.values());
+    let (buttons, analog) = others.chain(set.actions.values()).fold((0, 0), |(b, a), action| match action.kind {
+        Kind::Button => (b + 1, a),
+        _ => (b, a + 1),
+    });
     if analog > MAX_ANALOG_ACTIONS {
-        return Err(format!("too many analog actions across all sets ({analog} > {MAX_ANALOG_ACTIONS})"));
+        return Err(format!("too many analog actions across all sets (max {MAX_ANALOG_ACTIONS})"));
     }
-    if digital > MAX_DIGITAL_ACTIONS {
-        return Err(format!("too many button actions across all sets ({digital} > {MAX_DIGITAL_ACTIONS})"));
+    if buttons > MAX_BUTTON_ACTIONS {
+        return Err(format!("too many button actions across all sets (max {MAX_BUTTON_ACTIONS})"));
     }
 
     reg.sets.insert(name.to_owned(), set);
@@ -217,10 +150,6 @@ struct Vdf {
 }
 
 impl Vdf {
-    fn new() -> Self {
-        Vdf { out: String::new(), depth: 0 }
-    }
-
     fn quote(s: &str) -> String {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
@@ -239,6 +168,12 @@ impl Vdf {
         self.depth -= 1;
         let _ = writeln!(self.out, "{}}}", "\t".repeat(self.depth));
     }
+
+    fn block(&mut self, k: &str, f: impl FnOnce(&mut Self)) {
+        self.open(k);
+        f(self);
+        self.close();
+    }
 }
 
 #[derive(Default)]
@@ -250,51 +185,40 @@ struct Group {
 
 fn build_groups(set_name: &str, set: &ActionSet) -> BTreeMap<&'static str, Group> {
     let mut groups: BTreeMap<&'static str, Group> = BTreeMap::new();
-
-    for (action, def) in &set.analog {
+    for (action, def) in &set.actions {
+        let steam_name = steam_action_name(set_name, action);
         for d in &def.defaults {
-            let source = stick_source(d).unwrap();
-            let g = groups.entry(source).or_default();
-            g.mode = def.mode.group_mode();
-            g.gameaction = Some(steam_action_name(set_name, action));
-        }
-    }
-    for (action, def) in &set.triggers {
-        for d in &def.defaults {
-            let source = trigger_source(d).unwrap();
-            let g = groups.entry(source).or_default();
-            g.mode = "trigger";
-            g.gameaction = Some(steam_action_name(set_name, action));
-        }
-    }
-    for (action, def) in &set.buttons {
-        for d in &def.defaults {
-            let src = digital_source(d).unwrap();
-            let g = groups.entry(src.group).or_default();
-            if g.mode.is_empty() {
-                g.mode = src.mode;
+            if def.kind == Kind::Button {
+                let (source, mode, input) = button_source(d).unwrap();
+                let g = groups.entry(source).or_default();
+                if g.mode.is_empty() {
+                    g.mode = mode;
+                }
+                g.inputs.entry(input).or_default().push(format!("game_action {set_name} {steam_name}, , "));
+            } else {
+                let (source, mode) = analog_source(def.kind, d).unwrap();
+                let g = groups.entry(source).or_default();
+                g.mode = mode;
+                g.gameaction = Some(steam_name.clone());
             }
-            g.inputs
-                .entry(src.input)
-                .or_default()
-                .push(format!("game_action {set_name} {}, , ", steam_action_name(set_name, action)));
         }
     }
     groups
 }
 
 fn remap_for_controller(controller: &str, source: &'static str, mode: &'static str) -> (&'static str, &'static str) {
-    match (controller, source) {
-        ("controller_steamcontroller_gordon", "right_joystick") => (
-            "right_trackpad",
-            if mode == "joystick_mouse" { "absolute_mouse" } else { mode },
-        ),
+    match (controller, source, mode) {
+        ("controller_steamcontroller_gordon", "right_joystick", "joystick_mouse") => ("right_trackpad", "absolute_mouse"),
+        ("controller_steamcontroller_gordon", "right_joystick", _) => ("right_trackpad", mode),
         _ => (source, mode),
     }
 }
 
 fn controller_config(controller: &str, sets: &BTreeMap<String, ActionSet>, revision: u32) -> String {
-    let mut v = Vdf::new();
+    let mut v = Vdf { out: String::new(), depth: 0 };
+    let mut presets = Vec::new();
+    let mut next_id = 0u32;
+
     v.open("controller_mappings");
     v.kv("version", "3");
     v.kv("revision", &revision.to_string());
@@ -303,135 +227,106 @@ fn controller_config(controller: &str, sets: &BTreeMap<String, ActionSet>, revis
     v.kv("creator", "-1");
     v.kv("controller_type", controller);
 
-    let mut next_id = 0u32;
-    let mut presets = Vec::new();
-
     for (set_name, set) in sets {
         let mut bindings = Vec::new();
         for (source, group) in build_groups(set_name, set) {
             let (source, mode) = remap_for_controller(controller, source, group.mode);
             let id = next_id;
             next_id += 1;
-
-            v.open("group");
-            v.kv("id", &id.to_string());
-            v.kv("mode", mode);
-            v.open("inputs");
-            for (input, binds) in &group.inputs {
-                v.open(input);
-                v.open("activators");
-                v.open("Full_Press");
-                v.open("bindings");
-                for b in binds {
-                    v.kv("binding", b);
-                }
-                v.close();
-                v.close();
-                v.close();
-                v.close();
-            }
-            v.close();
-            if let Some(action) = &group.gameaction {
-                v.open("settings");
-                v.kv("virtual_mode", "1");
-                if mode == "joystick_mouse" {
-                    v.kv("output_joystick", "2");
-                }
-                v.close();
-                v.open("gameactions");
-                v.kv(set_name, action);
-                v.close();
-            }
-            v.close();
             bindings.push((id, source));
+
+            v.block("group", |v| {
+                v.kv("id", &id.to_string());
+                v.kv("mode", mode);
+                v.block("inputs", |v| {
+                    for (input, binds) in &group.inputs {
+                        v.block(input, |v| {
+                            v.block("activators", |v| {
+                                v.block("Full_Press", |v| {
+                                    v.block("bindings", |v| binds.iter().for_each(|b| v.kv("binding", b)));
+                                })
+                            })
+                        });
+                    }
+                });
+                if let Some(action) = &group.gameaction {
+                    v.block("settings", |v| {
+                        v.kv("virtual_mode", "1");
+                        if mode == "joystick_mouse" {
+                            v.kv("output_joystick", "2");
+                        }
+                    });
+                    v.block("gameactions", |v| v.kv(set_name, action));
+                }
+            });
         }
         presets.push((set_name, bindings));
     }
 
     for (i, (set_name, bindings)) in presets.into_iter().enumerate() {
-        v.open("preset");
-        v.kv("id", &i.to_string());
-        v.kv("name", set_name);
-        v.open("group_source_bindings");
-        for (id, source) in bindings {
-            v.kv(&id.to_string(), &format!("{source} active"));
-        }
-        v.close();
-        v.close();
+        v.block("preset", |v| {
+            v.kv("id", &i.to_string());
+            v.kv("name", set_name);
+            v.block("group_source_bindings", |v| {
+                for (id, source) in bindings {
+                    v.kv(&id.to_string(), &format!("{source} active"));
+                }
+            });
+        });
     }
 
-    v.open("settings");
-    v.close();
+    v.block("settings", |_| {});
     v.close();
     v.out
 }
 
 fn manifest(sets: &BTreeMap<String, ActionSet>) -> String {
-    let mut v = Vdf::new();
-    v.open("Action Manifest");
-
-    v.open("configurations");
-    for controller in CONTROLLER_TYPES {
-        v.open(controller);
-        v.open("0");
-        v.kv("path", &format!("{controller}.vdf"));
-        v.close();
-        v.close();
-    }
-    v.close();
-
+    let mut v = Vdf { out: String::new(), depth: 0 };
     let mut loc = vec![
         ("Title_SteamInput".to_owned(), "gm_steaminput".to_owned()),
         ("Description_SteamInput".to_owned(), "Default layout generated by gm_steaminput".to_owned()),
     ];
 
-    v.open("actions");
-    for (set_name, set) in sets {
-        v.open(set_name);
-        let set_token = format!("Set_{set_name}");
-        v.kv("title", &format!("#{set_token}"));
-        v.kv("legacy_set", "0");
-        loc.push((set_token, set.title.clone()));
-
-        let mut token = |action: &str, title: &str| {
-            let t = format!("Action_{}", steam_action_name(set_name, action));
-            loc.push((t.clone(), title.to_owned()));
-            format!("#{t}")
-        };
-
-        v.open("StickPadGyro");
-        for (action, def) in &set.analog {
-            v.open(&steam_action_name(set_name, action));
-            v.kv("title", &token(action, &def.title));
-            v.kv("input_mode", def.mode.input_mode());
-            v.close();
+    v.open("Action Manifest");
+    v.block("configurations", |v| {
+        for controller in CONTROLLER_TYPES {
+            v.block(controller, |v| v.block("0", |v| v.kv("path", &format!("{controller}.vdf"))));
         }
-        v.close();
+    });
 
-        v.open("AnalogTrigger");
-        for (action, def) in &set.triggers {
-            v.kv(&steam_action_name(set_name, action), &token(action, &def.title));
+    v.block("actions", |v| {
+        for (set_name, set) in sets {
+            let set_token = format!("Set_{set_name}");
+            loc.push((set_token.clone(), set.title.clone()));
+
+            v.block(set_name, |v| {
+                v.kv("title", &format!("#{set_token}"));
+                v.kv("legacy_set", "0");
+
+                let mut section = |v: &mut Vdf, name: &str, kinds: &[Kind]| {
+                    v.block(name, |v| {
+                        for (action, def) in set.actions.iter().filter(|(_, a)| kinds.contains(&a.kind)) {
+                            let steam_name = steam_action_name(set_name, action);
+                            let token = format!("Action_{steam_name}");
+                            loc.push((token.clone(), def.title.clone()));
+                            match def.kind {
+                                Kind::Stick | Kind::Mouse => v.block(&steam_name, |v| {
+                                    v.kv("title", &format!("#{token}"));
+                                    v.kv("input_mode", if def.kind == Kind::Mouse { "absolute_mouse" } else { "joystick_move" });
+                                }),
+                                _ => v.kv(&steam_name, &format!("#{token}")),
+                            }
+                        }
+                    });
+                };
+                section(v, "StickPadGyro", &[Kind::Stick, Kind::Mouse]);
+                section(v, "AnalogTrigger", &[Kind::Trigger]);
+                section(v, "Button", &[Kind::Button]);
+            });
         }
-        v.close();
+    });
 
-        v.open("Button");
-        for (action, def) in &set.buttons {
-            v.kv(&steam_action_name(set_name, action), &token(action, &def.title));
-        }
-        v.close();
-
-        v.close();
-    }
-    v.close();
-
-    v.open("localization");
-    v.open("english");
-    for (k, val) in &loc {
-        v.kv(k, val);
-    }
-    v.close();
-    v.close();
-
+    v.block("localization", |v| v.block("english", |v| loc.iter().for_each(|(k, val)| v.kv(k, val))));
     v.close();
     v.out
 }
@@ -441,18 +336,11 @@ fn fnv1a(s: &str) -> u32 {
 }
 
 pub fn garrysmod_dir() -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("garrysmod"));
-        candidates.push(cwd);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for dir in exe.ancestors().skip(1).take(4) {
-            candidates.push(dir.join("garrysmod"));
-        }
-    }
-    candidates
-        .into_iter()
+    let cwd = std::env::current_dir().into_iter().flat_map(|cwd| [cwd.join("garrysmod"), cwd]);
+    let exe = std::env::current_exe().into_iter().flat_map(|exe| {
+        exe.ancestors().skip(1).take(4).map(|d| d.join("garrysmod")).collect::<Vec<_>>()
+    });
+    cwd.chain(exe)
         .find(|c| c.join("gameinfo.txt").is_file())
         .ok_or_else(|| "could not locate the garrysmod directory".to_owned())
 }
@@ -465,17 +353,18 @@ pub fn write_files() -> Result<String, String> {
 
     let dir = garrysmod_dir()?.join("data").join("steaminput");
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    let write = |name: &str, contents: String| {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        Ok::<_, String>(path)
+    };
 
     let manifest = manifest(&reg.sets);
     let revision = fnv1a(&manifest) & 0x7fff_ffff;
-
     for controller in CONTROLLER_TYPES {
-        let path = dir.join(format!("{controller}.vdf"));
-        std::fs::write(&path, controller_config(controller, &reg.sets, revision))
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        write(&format!("{controller}.vdf"), controller_config(controller, &reg.sets, revision))?;
     }
 
-    let path = dir.join("manifest.vdf");
-    std::fs::write(&path, manifest).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    let path = write("manifest.vdf", manifest)?;
     path.to_str().map(str::to_owned).ok_or_else(|| "manifest path is not valid UTF-8".into())
 }

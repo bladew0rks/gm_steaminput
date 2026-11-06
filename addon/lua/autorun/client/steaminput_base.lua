@@ -8,26 +8,24 @@ end
 
 local SET = "base"
 
-local BUTTON_ORDER = {
-	"attack", "attack2", "jump", "duck", "reload", "use", "sprint",
-	"walk", "invprev", "invnext", "flashlight", "scores", "menu",
+local BUTTONS = {
+	{ name = "attack", title = "Primary Attack", default = "rt", key = IN_ATTACK },
+	{ name = "attack2", title = "Secondary Attack", default = "lt", key = IN_ATTACK2 },
+	{ name = "jump", title = "Jump", default = "a", key = IN_JUMP },
+	{ name = "duck", title = "Crouch", default = "b", key = IN_DUCK },
+	{ name = "reload", title = "Reload", default = "x", key = IN_RELOAD },
+	{ name = "use", title = "Use", default = "y", key = IN_USE },
+	{ name = "sprint", title = "Sprint", default = "ls", key = IN_SPEED },
+	{ name = "walk", title = "Walk", default = "rs", key = IN_WALK },
+	{ name = "invprev", title = "Previous Weapon", default = "lb" },
+	{ name = "invnext", title = "Next Weapon", default = "rb" },
+	{ name = "flashlight", title = "Flashlight", default = "dpad_up" },
+	{ name = "scores", title = "Scoreboard", default = "back" },
+	{ name = "menu", title = "Menu", default = "start" },
 }
 
-local BUTTONS = {
-	attack = { title = "Primary Attack", default = "rt", key = IN_ATTACK },
-	attack2 = { title = "Secondary Attack", default = "lt", key = IN_ATTACK2 },
-	jump = { title = "Jump", default = "a", key = IN_JUMP },
-	duck = { title = "Crouch", default = "b", key = IN_DUCK },
-	reload = { title = "Reload", default = "x", key = IN_RELOAD },
-	use = { title = "Use", default = "y", key = IN_USE },
-	sprint = { title = "Sprint", default = "ls", key = IN_SPEED },
-	walk = { title = "Walk", default = "rs", key = IN_WALK },
-	invprev = { title = "Previous Weapon", default = "lb" },
-	invnext = { title = "Next Weapon", default = "rb" },
-	flashlight = { title = "Flashlight", default = "dpad_up" },
-	scores = { title = "Scoreboard", default = "back" },
-	menu = { title = "Menu", default = "start" },
-}
+local buttonDefs = {}
+for _, b in ipairs(BUTTONS) do buttonDefs[b.name] = b end
 
 steaminput.RegisterActionSet(SET, {
 	title = "On Foot",
@@ -35,7 +33,7 @@ steaminput.RegisterActionSet(SET, {
 		move = { title = "Move", mode = "joystick_move", default = "left_stick" },
 		look = { title = "Look", mode = "absolute_mouse", default = "right_stick" },
 	},
-	buttons = BUTTONS,
+	buttons = buttonDefs,
 })
 
 local cv_enabled = CreateClientConVar("steaminput_enabled", "1", true, false, "Drive the player with a Steam Input controller")
@@ -91,10 +89,10 @@ hook.Add("Think", "steaminput_base", function()
 
 	steaminput.ActivateActionSet(h, SET)
 
-	for _, name in ipairs(BUTTON_ORDER) do
-		local down = steaminput.GetDigitalAction(h, SET, name)
-		if down and not state.held[name] then state.queued[name] = true end
-		state.held[name] = down
+	for _, b in ipairs(BUTTONS) do
+		local down = steaminput.GetDigitalAction(h, SET, b.name)
+		if down and not state.held[b.name] then state.queued[b.name] = true end
+		state.held[b.name] = down
 	end
 
 	state.move.x, state.move.y = steaminput.GetAnalogAction(h, SET, "move")
@@ -143,8 +141,8 @@ hook.Add("CreateMove", "steaminput_base", function(cmd)
 		end
 	end
 
-	for name, def in pairs(BUTTONS) do
-		if def.key and held[name] then cmd:AddKey(def.key) end
+	for _, b in ipairs(BUTTONS) do
+		if b.key and held[b.name] then cmd:AddKey(b.key) end
 	end
 
 	if cmd:CommandNumber() == 0 then return end
@@ -199,8 +197,8 @@ local function refreshOrigins()
 	local h = state.controller
 	origins = {}
 	if not h then return end
-	for _, name in ipairs(BUTTON_ORDER) do
-		origins[name] = steaminput.GetDigitalActionOrigins(h, SET, name)
+	for _, b in ipairs(BUTTONS) do
+		origins[b.name] = steaminput.GetDigitalActionOrigins(h, SET, b.name)
 	end
 	for _, a in ipairs(ANALOG) do
 		origins[a.name] = steaminput.GetAnalogActionOrigins(h, SET, a.name)
@@ -246,7 +244,7 @@ hook.Add("HUDPaint", "steaminput_overlay", function()
 
 	local pad, glyph, rowH, colW = 10, 22, 26, 150
 	local cols = 2
-	local rows = math.ceil(#BUTTON_ORDER / cols)
+	local rows = math.ceil(#BUTTONS / cols)
 	local w = pad * 2 + cols * colW + (cols - 1) * 6
 	local stickH = 86
 	local h = pad + 20 + stickH + rows * rowH + pad
@@ -274,13 +272,13 @@ hook.Add("HUDPaint", "steaminput_overlay", function()
 	end
 
 	local by = sy + stickH
-	for i, name in ipairs(BUTTON_ORDER) do
+	for i, b in ipairs(BUTTONS) do
 		local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
 		local rx, ry = x + pad + col * (colW + 6), by + row * rowH
-		local on = state.held[name]
+		local on = state.held[b.name]
 		draw.RoundedBox(0, rx, ry, colW, rowH - 4, on and COLOR_ROW_ON or COLOR_ROW)
-		local gw = drawGlyphs(origins[name], rx + 2, ry + (rowH - 4 - glyph) / 2, glyph)
-		draw.SimpleText(BUTTONS[name].title, "SteamInputOverlaySmall", rx + gw + 8, ry + (rowH - 4) / 2, on and color_black or COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+		local gw = drawGlyphs(origins[b.name], rx + 2, ry + (rowH - 4 - glyph) / 2, glyph)
+		draw.SimpleText(b.title, "SteamInputOverlaySmall", rx + gw + 8, ry + (rowH - 4) / 2, on and color_black or COLOR_TEXT, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
 	end
 end)
 

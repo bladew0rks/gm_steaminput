@@ -1,36 +1,30 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::actions::garrysmod_dir;
 
-static CACHE: Mutex<Option<HashMap<(i32, i32, u32), String>>> = Mutex::new(None);
+static CACHE: Mutex<BTreeMap<(i32, i32, u32), String>> = Mutex::new(BTreeMap::new());
 
 fn wine_path(path: &str) -> PathBuf {
-    if path.starts_with('/') {
-        PathBuf::from(format!("Z:{}", path.replace('/', "\\")))
-    } else {
-        PathBuf::from(path)
+    match path.starts_with('/') {
+        true => PathBuf::from(format!("Z:{}", path.replace('/', "\\"))),
+        false => PathBuf::from(path),
     }
 }
 
-pub fn material_path(origin: i32, size: i32, flags: u32, source: impl FnOnce() -> Option<String>) -> Option<String> {
+pub fn material_path(origin: i32, size: i32, flags: u32, source: Option<String>) -> Option<String> {
     let key = (origin, size, flags);
-    if let Some(cached) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&key) {
+    if let Some(cached) = CACHE.lock().unwrap().get(&key) {
         return Some(cached.clone());
     }
 
-    let result = (|| {
-        let source = wine_path(&source()?);
-        let dir = garrysmod_dir().ok()?.join("data").join("steaminput").join("glyphs");
-        std::fs::create_dir_all(&dir).ok()?;
-        let name = format!("{origin}_{size}_{flags}.png");
-        std::fs::copy(&source, dir.join(&name)).ok()?;
-        Some(format!("../data/steaminput/glyphs/{name}"))
-    })();
+    let dir = garrysmod_dir().ok()?.join("data").join("steaminput").join("glyphs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let name = format!("{origin}_{size}_{flags}.png");
+    std::fs::copy(wine_path(&source?), dir.join(&name)).ok()?;
 
-    if result.is_some() {
-        CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, result.clone().unwrap());
-    }
-    result
+    let path = format!("../data/steaminput/glyphs/{name}");
+    CACHE.lock().unwrap().insert(key, path.clone());
+    Some(path)
 }

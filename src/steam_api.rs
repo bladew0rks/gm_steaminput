@@ -1,28 +1,27 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use libloading::os::windows::Library;
 
 const STEAM_API_DLL: &str = "steam_api64.dll";
-pub const MAX_CONTROLLERS: usize = 16;
+const MAX_CONTROLLERS: usize = 16;
+const MAX_ORIGINS: usize = 8;
 
 pub type InputHandle = u64;
 pub const ALL_CONTROLLERS: InputHandle = u64::MAX;
-const MAX_ORIGINS: usize = 8;
 type Iface = *mut c_void;
-type NameToHandle = unsafe extern "C" fn(Iface, *const c_char) -> u64;
-type GetOrigins = unsafe extern "C" fn(Iface, InputHandle, u64, u64, *mut i32) -> i32;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct DigitalActionData {
     pub state: bool,
     pub active: bool,
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct AnalogActionData {
     pub mode: i32,
     pub x: f32,
@@ -37,153 +36,59 @@ enum HandleKind {
     Analog,
 }
 
-pub struct SteamInput {
-    _lib: Library,
-    iface: Iface,
-    shutdown: unsafe extern "C" fn(Iface) -> bool,
-    run_frame: unsafe extern "C" fn(Iface, bool),
-    get_connected_controllers: unsafe extern "C" fn(Iface, *mut InputHandle) -> i32,
-    get_input_type_for_handle: unsafe extern "C" fn(Iface, InputHandle) -> i32,
-    trigger_vibration: unsafe extern "C" fn(Iface, InputHandle, u16, u16),
-    set_led_color: unsafe extern "C" fn(Iface, InputHandle, u8, u8, u8, u32),
-    show_binding_panel: unsafe extern "C" fn(Iface, InputHandle) -> bool,
-    set_manifest_path: unsafe extern "C" fn(Iface, *const c_char) -> bool,
-    get_action_set_handle: NameToHandle,
-    activate_action_set: unsafe extern "C" fn(Iface, InputHandle, u64),
-    get_digital_action_handle: NameToHandle,
-    get_digital_action_data: unsafe extern "C" fn(Iface, InputHandle, u64) -> DigitalActionData,
-    get_analog_action_handle: NameToHandle,
-    get_analog_action_data: unsafe extern "C" fn(Iface, InputHandle, u64) -> AnalogActionData,
-    get_digital_action_origins: GetOrigins,
-    get_analog_action_origins: GetOrigins,
-    get_glyph_png: unsafe extern "C" fn(Iface, i32, i32, u32) -> *const c_char,
-    get_string_for_origin: unsafe extern "C" fn(Iface, i32) -> *const c_char,
-    handles: Mutex<HashMap<(HandleKind, String), u64>>,
-}
-
-unsafe impl Send for SteamInput {}
-
-static STEAM_INPUT: Mutex<Option<SteamInput>> = Mutex::new(None);
-
 unsafe fn sym<T: Copy>(lib: &Library, name: &str) -> Result<T, String> {
     lib.get::<T>(name)
         .map(|s| *s)
         .map_err(|e| format!("missing {name} in {STEAM_API_DLL}: {e}"))
 }
 
-impl SteamInput {
-    unsafe fn open() -> Result<Self, String> {
-        let lib = Library::open_already_loaded(STEAM_API_DLL)
-            .map_err(|e| format!("failed to open {STEAM_API_DLL}: {e}"))?;
-
-        let accessor: unsafe extern "C" fn() -> Iface = sym(&lib, "SteamAPI_SteamInput_v006")?;
-        let init: unsafe extern "C" fn(Iface, bool) -> bool = sym(&lib, "SteamAPI_ISteamInput_Init")?;
-
-        let iface = accessor();
-        if iface.is_null() {
-            return Err("SteamInput006 interface is unavailable".into());
+macro_rules! steam_fns {
+    ($($field:ident = $name:literal: fn($($arg:ty),*) $(-> $ret:ty)?;)*) => {
+        struct Fns {
+            $($field: unsafe extern "C" fn(Iface $(, $arg)*) $(-> $ret)?,)*
         }
 
-        let api = SteamInput {
-            iface,
-            shutdown: sym(&lib, "SteamAPI_ISteamInput_Shutdown")?,
-            run_frame: sym(&lib, "SteamAPI_ISteamInput_RunFrame")?,
-            get_connected_controllers: sym(&lib, "SteamAPI_ISteamInput_GetConnectedControllers")?,
-            get_input_type_for_handle: sym(&lib, "SteamAPI_ISteamInput_GetInputTypeForHandle")?,
-            trigger_vibration: sym(&lib, "SteamAPI_ISteamInput_TriggerVibration")?,
-            set_led_color: sym(&lib, "SteamAPI_ISteamInput_SetLEDColor")?,
-            show_binding_panel: sym(&lib, "SteamAPI_ISteamInput_ShowBindingPanel")?,
-            set_manifest_path: sym(&lib, "SteamAPI_ISteamInput_SetInputActionManifestFilePath")?,
-            get_action_set_handle: sym(&lib, "SteamAPI_ISteamInput_GetActionSetHandle")?,
-            activate_action_set: sym(&lib, "SteamAPI_ISteamInput_ActivateActionSet")?,
-            get_digital_action_handle: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionHandle")?,
-            get_digital_action_data: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionData")?,
-            get_analog_action_handle: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionHandle")?,
-            get_analog_action_data: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionData")?,
-            get_digital_action_origins: sym(&lib, "SteamAPI_ISteamInput_GetDigitalActionOrigins")?,
-            get_analog_action_origins: sym(&lib, "SteamAPI_ISteamInput_GetAnalogActionOrigins")?,
-            get_glyph_png: sym(&lib, "SteamAPI_ISteamInput_GetGlyphPNGForActionOrigin")?,
-            get_string_for_origin: sym(&lib, "SteamAPI_ISteamInput_GetStringForActionOrigin")?,
-            handles: Mutex::new(HashMap::new()),
-            _lib: lib,
-        };
-
-        if !init(iface, true) {
-            return Err("ISteamInput::Init failed".into());
+        impl Fns {
+            unsafe fn load(lib: &Library) -> Result<Self, String> {
+                Ok(Fns { $($field: sym(lib, concat!("SteamAPI_ISteamInput_", $name))?,)* })
+            }
         }
-
-        Ok(api)
-    }
-
-    pub fn run_frame(&self) {
-        unsafe { (self.run_frame)(self.iface, true) }
-    }
-
-    pub fn connected_controllers(&self) -> Vec<InputHandle> {
-        let mut handles = [0; MAX_CONTROLLERS];
-        let count = unsafe { (self.get_connected_controllers)(self.iface, handles.as_mut_ptr()) };
-        handles[..(count.clamp(0, MAX_CONTROLLERS as i32) as usize)].to_vec()
-    }
-
-    pub fn input_type(&self, handle: InputHandle) -> i32 {
-        unsafe { (self.get_input_type_for_handle)(self.iface, handle) }
-    }
-
-    pub fn trigger_vibration(&self, handle: InputHandle, left: u16, right: u16) {
-        unsafe { (self.trigger_vibration)(self.iface, handle, left, right) }
-    }
-
-    pub fn set_led_color(&self, handle: InputHandle, r: u8, g: u8, b: u8, restore_default: bool) {
-        unsafe { (self.set_led_color)(self.iface, handle, r, g, b, restore_default as u32) }
-    }
-
-    pub fn show_binding_panel(&self, handle: InputHandle) -> bool {
-        unsafe { (self.show_binding_panel)(self.iface, handle) }
-    }
+    };
 }
 
-impl SteamInput {
-    pub fn set_manifest_path(&self, path: &str) -> bool {
-        let Ok(path) = CString::new(path) else { return false };
-        self.handles.lock().unwrap().clear();
-        unsafe { (self.set_manifest_path)(self.iface, path.as_ptr()) }
-    }
-
-    fn handle(&self, kind: HandleKind, name: &str) -> Option<u64> {
-        let key = (kind, name.to_owned());
-        if let Some(&handle) = self.handles.lock().unwrap().get(&key) {
-            return Some(handle);
-        }
-        let cname = CString::new(name).ok()?;
-        let lookup = match kind {
-            HandleKind::ActionSet => self.get_action_set_handle,
-            HandleKind::Digital => self.get_digital_action_handle,
-            HandleKind::Analog => self.get_analog_action_handle,
-        };
-        let handle = unsafe { lookup(self.iface, cname.as_ptr()) };
-        if handle == 0 {
-            return None;
-        }
-        self.handles.lock().unwrap().insert(key, handle);
-        Some(handle)
-    }
-
-    pub fn activate_action_set(&self, controller: InputHandle, set: &str) -> bool {
-        let Some(set) = self.handle(HandleKind::ActionSet, set) else { return false };
-        unsafe { (self.activate_action_set)(self.iface, controller, set) };
-        true
-    }
-
-    pub fn digital_action(&self, controller: InputHandle, action: &str) -> Option<DigitalActionData> {
-        let action = self.handle(HandleKind::Digital, action)?;
-        Some(unsafe { (self.get_digital_action_data)(self.iface, controller, action) })
-    }
-
-    pub fn analog_action(&self, controller: InputHandle, action: &str) -> Option<AnalogActionData> {
-        let action = self.handle(HandleKind::Analog, action)?;
-        Some(unsafe { (self.get_analog_action_data)(self.iface, controller, action) })
-    }
+steam_fns! {
+    init = "Init": fn(bool) -> bool;
+    shutdown = "Shutdown": fn() -> bool;
+    run_frame = "RunFrame": fn(bool);
+    connected_controllers = "GetConnectedControllers": fn(*mut InputHandle) -> i32;
+    input_type = "GetInputTypeForHandle": fn(InputHandle) -> i32;
+    trigger_vibration = "TriggerVibration": fn(InputHandle, u16, u16);
+    set_led_color = "SetLEDColor": fn(InputHandle, u8, u8, u8, u32);
+    show_binding_panel = "ShowBindingPanel": fn(InputHandle) -> bool;
+    set_manifest_path = "SetInputActionManifestFilePath": fn(*const c_char) -> bool;
+    action_set_handle = "GetActionSetHandle": fn(*const c_char) -> u64;
+    digital_action_handle = "GetDigitalActionHandle": fn(*const c_char) -> u64;
+    analog_action_handle = "GetAnalogActionHandle": fn(*const c_char) -> u64;
+    activate_action_set = "ActivateActionSet": fn(InputHandle, u64);
+    digital_action_data = "GetDigitalActionData": fn(InputHandle, u64) -> DigitalActionData;
+    analog_action_data = "GetAnalogActionData": fn(InputHandle, u64) -> AnalogActionData;
+    digital_action_origins = "GetDigitalActionOrigins": fn(InputHandle, u64, u64, *mut i32) -> i32;
+    analog_action_origins = "GetAnalogActionOrigins": fn(InputHandle, u64, u64, *mut i32) -> i32;
+    glyph_png = "GetGlyphPNGForActionOrigin": fn(i32, i32, u32) -> *const c_char;
+    origin_name = "GetStringForActionOrigin": fn(i32) -> *const c_char;
 }
+
+pub struct SteamInput {
+    _lib: Library,
+    iface: Iface,
+    fns: Fns,
+    handles: HashMap<(HandleKind, String), u64>,
+    rumble_until: HashMap<InputHandle, Instant>,
+}
+
+unsafe impl Send for SteamInput {}
+
+static STEAM_INPUT: Mutex<Option<SteamInput>> = Mutex::new(None);
 
 unsafe fn owned_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
@@ -194,28 +99,132 @@ unsafe fn owned_string(ptr: *const c_char) -> Option<String> {
 }
 
 impl SteamInput {
-    pub fn action_origins(&self, controller: InputHandle, set: &str, action: &str, analog: bool) -> Vec<i32> {
-        let Some(set) = self.handle(HandleKind::ActionSet, set) else { return Vec::new() };
-        let kind = if analog { HandleKind::Analog } else { HandleKind::Digital };
-        let Some(action) = self.handle(kind, action) else { return Vec::new() };
-        let lookup = if analog { self.get_analog_action_origins } else { self.get_digital_action_origins };
+    unsafe fn open() -> Result<Self, String> {
+        let lib = Library::open_already_loaded(STEAM_API_DLL)
+            .map_err(|e| format!("failed to open {STEAM_API_DLL}: {e}"))?;
+        let accessor: unsafe extern "C" fn() -> Iface = sym(&lib, "SteamAPI_SteamInput_v006")?;
+        let fns = Fns::load(&lib)?;
+
+        let iface = accessor();
+        if iface.is_null() {
+            return Err("SteamInput006 interface is unavailable".into());
+        }
+        if !(fns.init)(iface, true) {
+            return Err("ISteamInput::Init failed".into());
+        }
+
+        Ok(SteamInput { _lib: lib, iface, fns, handles: HashMap::new(), rumble_until: HashMap::new() })
+    }
+
+    pub fn run_frame(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<_> = self.rumble_until.iter().filter(|(_, &t)| t <= now).map(|(&h, _)| h).collect();
+        for handle in expired {
+            self.rumble_until.remove(&handle);
+            unsafe { (self.fns.trigger_vibration)(self.iface, handle, 0, 0) };
+        }
+        unsafe { (self.fns.run_frame)(self.iface, true) }
+    }
+
+    pub fn connected_controllers(&self) -> Vec<InputHandle> {
+        let mut handles = [0; MAX_CONTROLLERS];
+        let count = unsafe { (self.fns.connected_controllers)(self.iface, handles.as_mut_ptr()) };
+        handles[..count.clamp(0, MAX_CONTROLLERS as i32) as usize].to_vec()
+    }
+
+    pub fn input_type(&self, handle: InputHandle) -> i32 {
+        unsafe { (self.fns.input_type)(self.iface, handle) }
+    }
+
+    pub fn trigger_vibration(&mut self, handle: InputHandle, left: u16, right: u16, seconds: Option<f64>) {
+        match seconds.filter(|s| *s > 0.0 && (left > 0 || right > 0)) {
+            Some(s) => self.rumble_until.insert(handle, Instant::now() + Duration::from_secs_f64(s)),
+            None => self.rumble_until.remove(&handle),
+        };
+        unsafe { (self.fns.trigger_vibration)(self.iface, handle, left, right) }
+    }
+
+    pub fn set_led_color(&self, handle: InputHandle, r: u8, g: u8, b: u8, restore_default: bool) {
+        unsafe { (self.fns.set_led_color)(self.iface, handle, r, g, b, restore_default as u32) }
+    }
+
+    pub fn show_binding_panel(&self, handle: InputHandle) -> bool {
+        unsafe { (self.fns.show_binding_panel)(self.iface, handle) }
+    }
+
+    pub fn set_manifest_path(&mut self, path: &str) -> bool {
+        let Ok(path) = CString::new(path) else { return false };
+        self.handles.clear();
+        unsafe { (self.fns.set_manifest_path)(self.iface, path.as_ptr()) }
+    }
+
+    fn handle(&mut self, kind: HandleKind, name: &str) -> Option<u64> {
+        let key = (kind, name.to_owned());
+        if let Some(&handle) = self.handles.get(&key) {
+            return Some(handle);
+        }
+        let lookup = match kind {
+            HandleKind::ActionSet => self.fns.action_set_handle,
+            HandleKind::Digital => self.fns.digital_action_handle,
+            HandleKind::Analog => self.fns.analog_action_handle,
+        };
+        let cname = CString::new(name).ok()?;
+        let handle = unsafe { lookup(self.iface, cname.as_ptr()) };
+        if handle == 0 {
+            return None;
+        }
+        self.handles.insert(key, handle);
+        Some(handle)
+    }
+
+    pub fn activate_action_set(&mut self, controller: InputHandle, set: &str) -> bool {
+        let Some(set) = self.handle(HandleKind::ActionSet, set) else { return false };
+        unsafe { (self.fns.activate_action_set)(self.iface, controller, set) };
+        true
+    }
+
+    pub fn digital_action(&mut self, controller: InputHandle, action: &str) -> DigitalActionData {
+        match self.handle(HandleKind::Digital, action) {
+            Some(action) => unsafe { (self.fns.digital_action_data)(self.iface, controller, action) },
+            None => DigitalActionData::default(),
+        }
+    }
+
+    pub fn analog_action(&mut self, controller: InputHandle, action: &str) -> AnalogActionData {
+        match self.handle(HandleKind::Analog, action) {
+            Some(action) => unsafe { (self.fns.analog_action_data)(self.iface, controller, action) },
+            None => AnalogActionData::default(),
+        }
+    }
+
+    pub fn action_origins(&mut self, controller: InputHandle, set: &str, action: &str, analog: bool) -> Vec<i32> {
+        let (kind, lookup) = match analog {
+            true => (HandleKind::Analog, self.fns.analog_action_origins),
+            false => (HandleKind::Digital, self.fns.digital_action_origins),
+        };
+        let (Some(set), Some(action)) = (self.handle(HandleKind::ActionSet, set), self.handle(kind, action)) else {
+            return Vec::new();
+        };
         let mut origins = [0i32; MAX_ORIGINS];
         let count = unsafe { lookup(self.iface, controller, set, action, origins.as_mut_ptr()) };
         origins[..count.clamp(0, MAX_ORIGINS as i32) as usize].to_vec()
     }
 
     pub fn glyph_png(&self, origin: i32, size: i32, flags: u32) -> Option<String> {
-        unsafe { owned_string((self.get_glyph_png)(self.iface, origin, size, flags)) }
+        unsafe { owned_string((self.fns.glyph_png)(self.iface, origin, size, flags)) }
     }
 
     pub fn origin_name(&self, origin: i32) -> Option<String> {
-        unsafe { owned_string((self.get_string_for_origin)(self.iface, origin)) }
+        unsafe { owned_string((self.fns.origin_name)(self.iface, origin)) }
     }
 }
 
 impl Drop for SteamInput {
     fn drop(&mut self) {
-        unsafe { (self.shutdown)(self.iface) };
+        for &handle in self.rumble_until.keys() {
+            unsafe { (self.fns.trigger_vibration)(self.iface, handle, 0, 0) };
+        }
+        unsafe { (self.fns.shutdown)(self.iface) };
     }
 }
 
@@ -249,6 +258,6 @@ pub fn unload() {
     STEAM_INPUT.lock().unwrap().take();
 }
 
-pub fn with<R>(f: impl FnOnce(&SteamInput) -> R) -> Option<R> {
-    STEAM_INPUT.lock().unwrap().as_ref().map(f)
+pub fn with<R>(f: impl FnOnce(&mut SteamInput) -> R) -> Option<R> {
+    STEAM_INPUT.lock().unwrap().as_mut().map(f)
 }
