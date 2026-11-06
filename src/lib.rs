@@ -2,7 +2,9 @@ use gmod::lua::{LuaFunction, LuaString, State};
 use gmod::*;
 
 mod actions;
+mod events;
 mod glyphs;
+mod haptics;
 mod register;
 mod steam_api;
 
@@ -37,6 +39,29 @@ unsafe fn opt_integer(lua: State, arg: i32, default: isize) -> isize {
     if lua.is_none_or_nil(arg) { default } else { lua.check_integer(arg) as isize }
 }
 
+unsafe fn opt_seconds(lua: State, arg: i32) -> Option<f64> {
+    (!lua.is_none_or_nil(arg)).then(|| lua.check_number(arg))
+}
+
+unsafe fn opt_side(lua: State, arg: i32) -> haptics::Side {
+    if lua.is_none_or_nil(arg) {
+        return haptics::Side::Both;
+    }
+    let side = haptics::Side::parse(&lua.check_string(arg));
+    match side {
+        Some(side) => side,
+        None => lua.error(format!("bad argument #{arg}: expected 'left', 'right' or 'both'")),
+    }
+}
+
+unsafe fn check_u16(lua: State, arg: i32) -> u16 {
+    lua.check_integer(arg).clamp(0, u16::MAX as _) as u16
+}
+
+unsafe fn check_u8(lua: State, arg: i32) -> u8 {
+    lua.check_integer(arg).clamp(0, u8::MAX as _) as u8
+}
+
 unsafe fn push_list<T>(lua: State, items: &[T], push: impl Fn(&T)) -> i32 {
     lua.create_table(items.len() as i32, 0);
     for (i, item) in items.iter().enumerate() {
@@ -47,6 +72,7 @@ unsafe fn push_list<T>(lua: State, items: &[T], push: impl Fn(&T)) -> i32 {
 }
 
 fn apply_actions() -> Result<(), String> {
+    events::set_actions(actions::button_actions());
     let path = actions::write_files()?;
     match steam_api::with(|api| api.set_manifest_path(&path)) {
         Some(true) => Ok(()),
@@ -64,8 +90,42 @@ unsafe fn run_frame(lua: State) -> i32 {
             lua.call(1, 0);
         }
     }
-    steam_api::with(|api| api.run_frame());
+    let events = steam_api::with(|api| {
+        api.run_frame();
+        events::poll(api)
+    });
+    for event in events.unwrap_or_default() {
+        fire(lua, event);
+    }
     0
+}
+
+unsafe fn fire(lua: State, event: events::Event) {
+    use events::Event::*;
+    lua.get_global(lua_string!("hook"));
+    lua.get_field(-1, lua_string!("Run"));
+    let (name, handle) = match &event {
+        Connected(h, _) => ("SteamInputControllerConnected", h),
+        Disconnected(h) => ("SteamInputControllerDisconnected", h),
+        Pressed(h, ..) => ("SteamInputActionPressed", h),
+        Released(h, ..) => ("SteamInputActionReleased", h),
+    };
+    lua.push_string(name);
+    lua.push_string(&handle.to_string());
+    let nargs = match &event {
+        Connected(_, kind) => {
+            lua.push_string(kind);
+            3
+        }
+        Disconnected(_) => 2,
+        Pressed(_, set, action) | Released(_, set, action) => {
+            lua.push_string(set);
+            lua.push_string(action);
+            4
+        }
+    };
+    lua.pcall_ignore(nargs, 0);
+    lua.pop();
 }
 
 #[lua_function]
@@ -110,17 +170,63 @@ unsafe fn get_input_type(lua: State) -> i32 {
 #[lua_function]
 unsafe fn trigger_vibration(lua: State) -> i32 {
     let handle = check_handle(lua, 1);
-    let left = lua.check_integer(2).clamp(0, u16::MAX as _) as u16;
-    let right = lua.check_integer(3).clamp(0, u16::MAX as _) as u16;
-    let seconds = (!lua.is_none_or_nil(4)).then(|| lua.check_number(4));
-    api(lua, |api| api.trigger_vibration(handle, left, right, seconds));
+    let levels = [Some(check_u16(lua, 2)), Some(check_u16(lua, 3)), None, None];
+    let seconds = opt_seconds(lua, 4);
+    api(lua, |api| api.set_motors(handle, levels, seconds));
     0
+}
+
+#[lua_function]
+unsafe fn trigger_vibration_extended(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let levels = [2, 3, 4, 5].map(|arg| Some(check_u16(lua, arg)));
+    let seconds = opt_seconds(lua, 6);
+    api(lua, |api| api.set_motors(handle, levels, seconds));
+    0
+}
+
+#[lua_function]
+unsafe fn trigger_haptic_pulse(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let side = opt_side(lua, 2);
+    let intensity = check_u8(lua, 3);
+    let gain = if lua.is_none_or_nil(4) { 0 } else { lua.check_integer(4).clamp(-127, 127) as i8 };
+    api(lua, |api| api.simple_haptic_event(handle, side.haptic_location(), intensity, gain));
+    0
+}
+
+#[lua_function]
+unsafe fn set_trigger_effect(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let side = opt_side(lua, 2);
+    let mode = lua.check_string(3).into_owned();
+    let [a, b, c] = [4, 5, 6].map(|arg| if lua.is_none_or_nil(arg) { 0 } else { check_u8(lua, arg) });
+    let seconds = opt_seconds(lua, 7);
+    let Some(command) = haptics::trigger_command(&mode, a, b, c) else {
+        lua.error(format!("bad argument #3: unknown trigger effect '{mode}', expected off, feedback, weapon or vibration"));
+    };
+    api(lua, |api| haptics::set_trigger_effect(api, handle, side, command, seconds));
+    0
+}
+
+#[lua_function]
+unsafe fn haptic(lua: State) -> i32 {
+    let handle = check_handle(lua, 1);
+    let effect = lua.check_string(2).into_owned();
+    let strength = if lua.is_none_or_nil(3) { 1.0 } else { lua.check_number(3) };
+    let seconds = opt_seconds(lua, 4);
+    let side = opt_side(lua, 5);
+    match api(lua, |api| haptics::haptic(api, handle, &effect, strength, seconds, side)) {
+        Ok(method) => lua.push_string(method),
+        Err(e) => lua.error(format!("[steaminput] Haptic: {e}")),
+    }
+    1
 }
 
 #[lua_function]
 unsafe fn set_led_color(lua: State) -> i32 {
     let handle = check_handle(lua, 1);
-    let [r, g, b] = [2, 3, 4].map(|arg| lua.check_integer(arg).clamp(0, 255) as u8);
+    let [r, g, b] = [2, 3, 4].map(|arg| check_u8(lua, arg));
     api(lua, |api| api.set_led_color(handle, r, g, b, false));
     0
 }
@@ -212,10 +318,14 @@ unsafe fn gmod13_open(lua: State) -> i32 {
         lua.error(format!("[steaminput] {e}"));
     }
 
-    let functions: [(LuaString, LuaFunction); 15] = [
+    let functions: [(LuaString, LuaFunction); 19] = [
         (lua_string!("GetConnectedControllers"), get_connected_controllers),
         (lua_string!("GetInputType"), get_input_type),
         (lua_string!("TriggerVibration"), trigger_vibration),
+        (lua_string!("TriggerVibrationExtended"), trigger_vibration_extended),
+        (lua_string!("TriggerHapticPulse"), trigger_haptic_pulse),
+        (lua_string!("SetTriggerEffect"), set_trigger_effect),
+        (lua_string!("Haptic"), haptic),
         (lua_string!("SetLEDColor"), set_led_color),
         (lua_string!("ResetLEDColor"), reset_led_color),
         (lua_string!("ShowBindingPanel"), show_binding_panel),

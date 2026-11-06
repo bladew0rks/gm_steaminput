@@ -50,15 +50,7 @@ local state = {
 	look = { x = 0, y = 0 },
 }
 
-local nextScan = 0
-local scoresShown = false
 local lastLookFrame = -1
-
-local function scanController()
-	local handle = steaminput.GetConnectedControllers()[1]
-	state.controller = handle
-	state.typeName = handle and (steaminput.GetInputType(handle)) or nil
-end
 
 local function cycleWeapon(ply, dir)
 	local weapons = ply:GetWeapons()
@@ -78,40 +70,46 @@ local function cycleWeapon(ply, dir)
 	return weapons[1]
 end
 
-hook.Add("Think", "steaminput_base", function()
-	if CurTime() >= nextScan then
-		nextScan = CurTime() + 0.5
-		scanController()
-	end
+hook.Add("SteamInputControllerConnected", "steaminput_base", function(h, typeName)
+	if state.controller then return end
+	state.controller, state.typeName = h, typeName
+end)
 
+hook.Add("SteamInputControllerDisconnected", "steaminput_base", function(h)
+	if h ~= state.controller then return end
+	state.controller, state.typeName = nil, nil
+	state.held, state.queued = {}, {}
+
+	local other = steaminput.GetConnectedControllers()[1]
+	if other then state.controller, state.typeName = other, (steaminput.GetInputType(other)) end
+end)
+
+local PRESS_ACTIONS = {
+	menu = function()
+		if gui.IsGameUIVisible() then gui.HideGameUI() else gui.ActivateGameUI() end
+	end,
+	scores = function() RunConsoleCommand("+showscores") end,
+}
+
+hook.Add("SteamInputActionPressed", "steaminput_base", function(h, set, action)
+	if h ~= state.controller or set ~= SET then return end
+	state.held[action] = true
+	if not cv_enabled:GetBool() then return end
+	if PRESS_ACTIONS[action] then PRESS_ACTIONS[action]() else state.queued[action] = true end
+end)
+
+hook.Add("SteamInputActionReleased", "steaminput_base", function(h, set, action)
+	if h ~= state.controller or set ~= SET then return end
+	state.held[action] = nil
+	if action == "scores" then RunConsoleCommand("-showscores") end
+end)
+
+hook.Add("Think", "steaminput_base", function()
 	local h = state.controller
 	if not h then return end
-
 	steaminput.ActivateActionSet(h, SET)
-
-	for _, b in ipairs(BUTTONS) do
-		local down = steaminput.GetDigitalAction(h, SET, b.name)
-		if down and not state.held[b.name] then state.queued[b.name] = true end
-		state.held[b.name] = down
-	end
-
 	state.move.x, state.move.y = steaminput.GetAnalogAction(h, SET, "move")
 	state.look.x, state.look.y = steaminput.GetAnalogAction(h, SET, "look")
-
-	if not cv_enabled:GetBool() then
-		state.queued = {}
-		return
-	end
-
-	if state.queued.menu then
-		state.queued.menu = nil
-		if gui.IsGameUIVisible() then gui.HideGameUI() else gui.ActivateGameUI() end
-	end
-
-	if state.held.scores ~= scoresShown then
-		scoresShown = state.held.scores
-		RunConsoleCommand(scoresShown and "+showscores" or "-showscores")
-	end
 end)
 
 hook.Add("CreateMove", "steaminput_base", function(cmd)

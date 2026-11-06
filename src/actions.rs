@@ -140,6 +140,14 @@ pub fn register(name: &str, set: ActionSet) -> Result<(), String> {
     Ok(())
 }
 
+pub fn button_actions() -> Vec<(String, String)> {
+    let reg = REGISTRY.lock().unwrap();
+    reg.sets
+        .iter()
+        .flat_map(|(set, s)| s.actions.iter().filter(|(_, a)| a.kind == Kind::Button).map(move |(a, _)| (set.clone(), a.clone())))
+        .collect()
+}
+
 pub fn take_dirty() -> bool {
     std::mem::take(&mut REGISTRY.lock().unwrap().dirty)
 }

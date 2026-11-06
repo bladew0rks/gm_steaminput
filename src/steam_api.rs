@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -27,6 +27,42 @@ pub struct AnalogActionData {
     pub x: f32,
     pub y: f32,
     pub active: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TriggerCommand {
+    pub mode: i32,
+    _pad: [u8; 4],
+    pub data: [u8; 12],
+}
+
+impl TriggerCommand {
+    pub fn new(mode: i32, params: &[u8]) -> Self {
+        let mut data = [0; 12];
+        data[..params.len()].copy_from_slice(params);
+        TriggerCommand { mode, _pad: [0; 4], data }
+    }
+}
+
+#[repr(C)]
+struct TriggerEffectParam {
+    mask: u8,
+    _pad: [u8; 7],
+    commands: [TriggerCommand; 2],
+}
+
+const _: () = assert!(std::mem::size_of::<TriggerEffectParam>() == 48);
+
+pub const LEFT: usize = 0;
+pub const RIGHT: usize = 1;
+pub const LEFT_TRIGGER: usize = 2;
+pub const RIGHT_TRIGGER: usize = 3;
+
+#[derive(Clone, Copy, Default)]
+struct Motor {
+    level: u16,
+    until: Option<Instant>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,6 +99,9 @@ steam_fns! {
     connected_controllers = "GetConnectedControllers": fn(*mut InputHandle) -> i32;
     input_type = "GetInputTypeForHandle": fn(InputHandle) -> i32;
     trigger_vibration = "TriggerVibration": fn(InputHandle, u16, u16);
+    trigger_vibration_extended = "TriggerVibrationExtended": fn(InputHandle, u16, u16, u16, u16);
+    simple_haptic_event = "TriggerSimpleHapticEvent": fn(InputHandle, i32, u8, i8, u8, i8);
+    dualsense_trigger_effect = "SetDualSenseTriggerEffect": fn(InputHandle, *const TriggerEffectParam);
     set_led_color = "SetLEDColor": fn(InputHandle, u8, u8, u8, u32);
     show_binding_panel = "ShowBindingPanel": fn(InputHandle) -> bool;
     set_manifest_path = "SetInputActionManifestFilePath": fn(*const c_char) -> bool;
@@ -83,7 +122,9 @@ pub struct SteamInput {
     iface: Iface,
     fns: Fns,
     handles: HashMap<(HandleKind, String), u64>,
-    rumble_until: HashMap<InputHandle, Instant>,
+    motors: HashMap<InputHandle, [Motor; 4]>,
+    trigger_motors_on: HashSet<InputHandle>,
+    trigger_effects_until: HashMap<(InputHandle, usize), Instant>,
 }
 
 unsafe impl Send for SteamInput {}
@@ -113,16 +154,26 @@ impl SteamInput {
             return Err("ISteamInput::Init failed".into());
         }
 
-        Ok(SteamInput { _lib: lib, iface, fns, handles: HashMap::new(), rumble_until: HashMap::new() })
+        Ok(SteamInput { _lib: lib, iface, fns, handles: HashMap::new(), motors: HashMap::new(), trigger_motors_on: HashSet::new(), trigger_effects_until: HashMap::new() })
     }
 
     pub fn run_frame(&mut self) {
         let now = Instant::now();
-        let expired: Vec<_> = self.rumble_until.iter().filter(|(_, &t)| t <= now).map(|(&h, _)| h).collect();
-        for handle in expired {
-            self.rumble_until.remove(&handle);
-            unsafe { (self.fns.trigger_vibration)(self.iface, handle, 0, 0) };
+        let expired = |until: Option<Instant>| until.is_some_and(|t| t <= now);
+
+        let handles: Vec<_> = self.motors.iter().filter(|(_, m)| m.iter().any(|m| expired(m.until))).map(|(&h, _)| h).collect();
+        for handle in handles {
+            if let Some(motors) = self.motors.get_mut(&handle) {
+                motors.iter_mut().filter(|m| expired(m.until)).for_each(|m| *m = Motor::default());
+            }
+            self.send_motors(handle);
         }
+
+        let effects: Vec<_> = self.trigger_effects_until.iter().filter(|(_, &t)| t <= now).map(|(&k, _)| k).collect();
+        for (handle, trigger) in effects {
+            self.set_trigger_effect(handle, trigger, TriggerCommand::default(), None);
+        }
+
         unsafe { (self.fns.run_frame)(self.iface, true) }
     }
 
@@ -136,12 +187,49 @@ impl SteamInput {
         unsafe { (self.fns.input_type)(self.iface, handle) }
     }
 
-    pub fn trigger_vibration(&mut self, handle: InputHandle, left: u16, right: u16, seconds: Option<f64>) {
-        match seconds.filter(|s| *s > 0.0 && (left > 0 || right > 0)) {
-            Some(s) => self.rumble_until.insert(handle, Instant::now() + Duration::from_secs_f64(s)),
-            None => self.rumble_until.remove(&handle),
+    pub fn set_motors(&mut self, handle: InputHandle, levels: [Option<u16>; 4], seconds: Option<f64>) {
+        let until = seconds.filter(|s| *s > 0.0).map(|s| Instant::now() + Duration::from_secs_f64(s));
+        let motors = self.motors.entry(handle).or_default();
+        for (motor, level) in motors.iter_mut().zip(levels) {
+            if let Some(level) = level {
+                *motor = Motor { level, until: until.filter(|_| level > 0) };
+            }
+        }
+        self.send_motors(handle);
+    }
+
+    fn send_motors(&mut self, handle: InputHandle) {
+        let levels = self.motors.get(&handle).copied().unwrap_or_default().map(|m| m.level);
+        let [l, r, lt, rt] = levels;
+        let triggers_on = lt > 0 || rt > 0;
+        let use_extended = triggers_on || self.trigger_motors_on.contains(&handle);
+        match triggers_on {
+            true => self.trigger_motors_on.insert(handle),
+            false => self.trigger_motors_on.remove(&handle),
         };
-        unsafe { (self.fns.trigger_vibration)(self.iface, handle, left, right) }
+        unsafe {
+            match use_extended {
+                true => (self.fns.trigger_vibration_extended)(self.iface, handle, l, r, lt, rt),
+                false => (self.fns.trigger_vibration)(self.iface, handle, l, r),
+            }
+        }
+        if levels == [0; 4] {
+            self.motors.remove(&handle);
+        }
+    }
+
+    pub fn simple_haptic_event(&self, handle: InputHandle, location: i32, intensity: u8, gain_db: i8) {
+        unsafe { (self.fns.simple_haptic_event)(self.iface, handle, location, intensity, gain_db, 0, 0) }
+    }
+
+    pub fn set_trigger_effect(&mut self, handle: InputHandle, trigger: usize, command: TriggerCommand, seconds: Option<f64>) {
+        match seconds.filter(|s| *s > 0.0 && command.mode != 0) {
+            Some(s) => self.trigger_effects_until.insert((handle, trigger), Instant::now() + Duration::from_secs_f64(s)),
+            None => self.trigger_effects_until.remove(&(handle, trigger)),
+        };
+        let mut param = TriggerEffectParam { mask: 1 << trigger, _pad: [0; 7], commands: [TriggerCommand::default(); 2] };
+        param.commands[trigger] = command;
+        unsafe { (self.fns.dualsense_trigger_effect)(self.iface, handle, &param) }
     }
 
     pub fn set_led_color(&self, handle: InputHandle, r: u8, g: u8, b: u8, restore_default: bool) {
@@ -221,8 +309,12 @@ impl SteamInput {
 
 impl Drop for SteamInput {
     fn drop(&mut self) {
-        for &handle in self.rumble_until.keys() {
-            unsafe { (self.fns.trigger_vibration)(self.iface, handle, 0, 0) };
+        for &handle in self.motors.keys() {
+            unsafe { (self.fns.trigger_vibration_extended)(self.iface, handle, 0, 0, 0, 0) };
+        }
+        let off = TriggerEffectParam { mask: 0b11, _pad: [0; 7], commands: [TriggerCommand::default(); 2] };
+        for &(handle, _) in self.trigger_effects_until.keys() {
+            unsafe { (self.fns.dualsense_trigger_effect)(self.iface, handle, &off) };
         }
         unsafe { (self.fns.shutdown)(self.iface) };
     }
