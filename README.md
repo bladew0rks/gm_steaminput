@@ -218,4 +218,4 @@ end
 example/ is an addon that drives the player with a controller
 
 ## license
-MIT
+[MIT](LICENSE)
