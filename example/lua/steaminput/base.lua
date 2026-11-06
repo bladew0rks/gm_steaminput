@@ -43,6 +43,7 @@ local state = {
 }
 
 local lastLookFrame = -1
+local MOVE_KEY_THRESHOLD = 0.3
 
 local function cycleWeapon(ply, dir)
 	local weapons = ply:GetWeapons()
@@ -106,6 +107,10 @@ hook.Add("CreateMove", "steaminput_base", function(cmd)
 		local speed = held.walk and ply:GetSlowWalkSpeed() or held.sprint and ply:GetRunSpeed() or ply:GetWalkSpeed()
 		cmd:SetForwardMove(math.Clamp(cmd:GetForwardMove() + my * speed, -speed, speed))
 		cmd:SetSideMove(math.Clamp(cmd:GetSideMove() + mx * speed, -speed, speed))
+		if my > MOVE_KEY_THRESHOLD then cmd:AddKey(IN_FORWARD) end
+		if my < -MOVE_KEY_THRESHOLD then cmd:AddKey(IN_BACK) end
+		if mx > MOVE_KEY_THRESHOLD then cmd:AddKey(IN_MOVERIGHT) end
+		if mx < -MOVE_KEY_THRESHOLD then cmd:AddKey(IN_MOVELEFT) end
 	end
 
 	if FrameNumber() ~= lastLookFrame then
@@ -293,7 +298,5 @@ hook.Add("PopulateToolMenu", "steaminput_options", function()
 
 		local bindings = panel:Button("Edit controller bindings")
 		bindings.DoClick = openBindingPanel
-
-		panel:ControlHelp("Opens Steam's binding screen. Steam only shows it while Garry's Mod has focus.")
 	end)
 end)
