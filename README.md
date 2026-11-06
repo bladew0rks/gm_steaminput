@@ -7,15 +7,16 @@ clientside garry's mod binary module that gives lua access to steam's input api
 - rust nightly with the x86_64-pc-windows-gnu target, plus MinGW (x86_64-w64-mingw32-gcc)
 - steam input enabled in steam settings
 
+## installing
+put `gmcl_steaminput_win64.dll` from the latest release in garrysmod/lua/bin
+
 ## building
 ```sh
-make            # build release, install DLL + link addon
-make debug      # same, debug build
-make uninstall  # remove DLL and addon link
-make GMOD_DIR=/path/to/GarrysMod   # custom install location
+make            # build + install
+make debug      # debug build
+make uninstall
+make GMOD_DIR=/path/to/GarrysMod
 ```
-
-the binary module will be installed under garrysmod/lua/bin/gmcl_steaminput_win64.dll, addons will be symlinked to garrysmod/addons/steaminput
 
 ## lua api
 
@@ -24,13 +25,15 @@ require("steaminput")
 ```
 
 **controllers**
-| Function | Returns |
-|---|---|
-| `steaminput.GetConnectedControllers()` | list of controller handles (strings) |
-| `steaminput.GetInputType(h)` | type name, type id (e.g. `"XBoxOneController", 3`) |
-| `steaminput.TriggerVibration(h, left, right, seconds)` | rumble, 0–65535 per side, stops by itself after `seconds` if given |
-| `steaminput.SetLEDColor(h, r, g, b)` / `ResetLEDColor(h)` | LED colour, on controllers that have one |
-| `steaminput.ShowBindingPanel(h)` | opens Steam's binding screen |
+```lua
+steaminput.GetConnectedControllers()
+steaminput.GetPrimaryController()
+steaminput.GetInputType(h)                         -- "XBoxOneController", 3
+steaminput.TriggerVibration(h, left, right, seconds)
+steaminput.SetLEDColor(h, r, g, b)
+steaminput.ResetLEDColor(h)
+steaminput.ShowBindingPanel(h)
+```
 
 **actions**
 ```lua
@@ -41,77 +44,119 @@ steaminput.RegisterActionSet("mysweps", {
     analog   = { lean = { title = "Lean", mode = "joystick_move", default = "right_stick" } },
 })
 
-steaminput.ActivateActionSet(h, "mysweps")                          -- h or "all"
-local down, active = steaminput.GetDigitalAction(h, "mysweps", "firemode")
-local x, y, active = steaminput.GetAnalogAction(h, "mysweps", "lean")
+steaminput.ActivateActionSet(h, "mysweps")
+steaminput.GetCurrentActionSet(h)
+steaminput.GetDigitalAction(h, "mysweps", "firemode")   -- down, active
+steaminput.GetAnalogAction(h, "mysweps", "lean")        -- x, y, active
+steaminput.StopAnalogActionMomentum(h, "mysweps", "lean")
+steaminput.GetActions("mysweps")
+
+steaminput.IsDown("mysweps", "firemode", h)
+steaminput.WasPressed("mysweps", "firemode", h)
+steaminput.WasReleased("mysweps", "firemode", h)
 ```
 
-analog modes are `joystick_move` (stick position, -1 to 1) and `absolute_mouse` (mouse deltas)
+analog modes: `joystick_move`, `absolute_mouse`
 
-defaults can be `a b x y`, `dpad_up/down/left/right`, `lb rb start back`, `lt rt`, `ls rs`, `left_stick right_stick` and `button_back_left/right[_upper]`
+defaults: `a b x y`, `dpad_up/down/left/right`, `lb rb start back`, `lt rt`, `ls rs`, `left_stick right_stick`, `gyro`, `button_back_left/right[_upper]`
 
-all registered sets get merged into one manifest with default layouts for every controller type, written to garrysmod/data/steaminput/ and loaded on the next frame. `steaminput.ApplyActions()` does it right away
+`h` is optional on IsDown/WasPressed/WasReleased
+
+**layers**
+```lua
+steaminput.RegisterActionLayer("mylayer", "mysweps", {
+    title = "My Layer",
+    buttons = { inspect = { title = "Inspect", default = "y" } },
+})
+
+steaminput.ActivateActionSetLayer(h, "mylayer")
+steaminput.DeactivateActionSetLayer(h, "mylayer")
+steaminput.DeactivateAllActionSetLayers(h)
+steaminput.GetActiveActionSetLayers(h)
+```
 
 **hooks**
 ```lua
-hook.Add("SteamInputControllerConnected", "x", function(h, typeName) end)
-hook.Add("SteamInputControllerDisconnected", "x", function(h) end)
-hook.Add("SteamInputActionPressed", "x", function(h, set, action) end)
-hook.Add("SteamInputActionReleased", "x", function(h, set, action) end)
+SteamInputControllerConnected(h, typeName)
+SteamInputControllerDisconnected(h)
+SteamInputActionPressed(h, set, action)
+SteamInputActionReleased(h, set, action)
+SteamInputModeChanged(mode)
 ```
 
-connected fires for every controller that's already plugged in when the module loads. pressed/released only fire for button actions, and only while their set is active
+```lua
+hook.Add("SteamInputActionPressed", "mysweps", function(h, set, action)
+    if set == "mysweps" and action == "firemode" then
+        LocalPlayer():GetActiveWeapon():CycleFireMode()
+    end
+end)
+```
 
 **haptics**
 ```lua
-steaminput.Haptic(h, "trigger", 0.6, 0.15, "right")   -- effect, strength 0-1, seconds, side
+steaminput.Haptic(h, effect, strength, seconds, side)
+steaminput.TriggerVibrationExtended(h, left, right, leftTrigger, rightTrigger, seconds)
+steaminput.TriggerHapticPulse(h, side, intensity, gainDB)
+steaminput.SetTriggerEffect(h, side, mode, a, b, c, seconds)
 ```
 
-adapts to whatever the controller supports, returns what it ended up using
-
-| Effect | Xbox One/Series | DualSense | Steam Controller/Deck | everything else |
+| Effect | Xbox | DualSense | Steam Controller/Deck | other |
 |---|---|---|---|---|
-| `rumble` | grip motors | grip motors | haptics (via steam) | grip motors |
-| `trigger` | impulse triggers | adaptive trigger vibration | grip motors | grip motors |
-| `click` | short rumble | short rumble | haptic pulse | short rumble |
-| `resistance` | nothing | adaptive trigger resistance | nothing | nothing |
+| `rumble` | rumble | rumble | haptics | rumble |
+| `trigger` | impulse triggers | adaptive triggers | rumble | rumble |
+| `click` | rumble | rumble | haptic pulse | rumble |
+| `resistance` | - | adaptive triggers | - | - |
 
-side is `left`, `right` or `both` (default). strength 0 turns an effect off
+```lua
+local h = steaminput.GetPrimaryController()
+steaminput.Haptic(h, "trigger", 0.6, 0.1, "right")
+steaminput.Haptic(h, "rumble", 1, 0.3)
+steaminput.TriggerVibration(h, 30000, 30000, 0.5)
+```
 
-raw versions if you want them:
-| Function | Does |
-|---|---|
-| `steaminput.TriggerVibrationExtended(h, left, right, leftTrigger, rightTrigger, seconds)` | xbox impulse triggers, 0–65535 |
-| `steaminput.TriggerHapticPulse(h, side, intensity, gainDB)` | steam controller/deck haptic pulse, intensity 0–255 |
-| `steaminput.SetTriggerEffect(h, side, mode, a, b, c, seconds)` | dualsense adaptive triggers, see below |
+**motion**
+```lua
+steaminput.GetMotionData(h)   -- { gyro = Vector, accel = Vector, orientation = { x, y, z, w } }
+```
 
-trigger effect modes: `off`, `feedback` (position 0–9, strength 0–8), `weapon` (start 2–7, end, strength 0–8), `vibration` (position 0–9, amplitude 0–8, frequency)
+```lua
+local gyro = steaminput.GetMotionData(h).gyro
+local lean = math.Clamp(gyro.y / 200, -1, 1)
+```
+
+**input mode & prompts**
+```lua
+steaminput.IsUsingController()
+steaminput.GetInputMode()   -- "controller" or "keyboard"
+steaminput.DrawPrompt("mysweps", "firemode", x, y, { bind = "+reload", size = 24 })
+steaminput.GetPromptText("mysweps", "firemode", "+reload")
+steaminput.GetActionGlyph("mysweps", "firemode")
+```
+
+```lua
+hook.Add("HUDPaint", "mysweps", function()
+    local w = steaminput.DrawPrompt("mysweps", "firemode", 20, 20, { bind = "+zoom" })
+    draw.SimpleText("fire mode", "DermaDefault", 20 + w + 6, 32, color_white, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+end)
+```
 
 **glyphs**
 ```lua
+steaminput.GetDigitalActionOrigins(h, set, action)
+steaminput.GetAnalogActionOrigins(h, set, action)
+steaminput.GetGlyph(origin, size, style)
+steaminput.GetOriginName(origin)
+```
+
+```lua
 for _, origin in ipairs(steaminput.GetDigitalActionOrigins(h, "mysweps", "firemode")) do
-    local mat = Material(steaminput.GetGlyph(origin))   -- size 0-2, style flags optional
-    local name = steaminput.GetOriginName(origin)       -- e.g. "D-Pad Left"
+    local mat = Material(steaminput.GetGlyph(origin))
+    local name = steaminput.GetOriginName(origin)
 end
 ```
 
-## base addon
+## example
+example/ is an addon that drives the player with a controller
 
-addon/lua/autorun/client/steaminput_base.lua registers an "On Foot" set and moves the player with it
-
-| Input | Action |
-|---|---|
-| left stick | move |
-| right stick | look |
-| rt / lt | attack / attack2 |
-| a | jump |
-| b | crouch |
-| x | reload |
-| y | use |
-| ls / rs | sprint / walk |
-| lb / rb | prev / next weapon |
-| dpad up | flashlight |
-| back | scoreboard |
-| start | menu |
-
-settings are in the spawnmenu under utilities > steam input, or the convars `steaminput_enabled`, `steaminput_overlay`, `steaminput_look_sensitivity` and `steaminput_look_invert`. `steaminput_bindings` opens steam's binding screen
+## license
+MIT
